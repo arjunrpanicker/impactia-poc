@@ -9,3 +9,4 @@ langchain-openai==0.0.5
 pydantic==2.6.1
 python-multipart==0.0.9
 tiktoken==0.6.0
+networkx==3.2.1
