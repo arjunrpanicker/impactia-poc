@@ -10,9 +10,10 @@ from .services.enhanced_rag_service import EnhancedRAGService
 from .services.azure_openai_service import AzureOpenAIService
 from .services.ado_service import AzureDevOpsService
 from .services.performance_analyzer import PerformanceAnalyzer
+from .services.smart_analysis_service import SmartAnalysisService, AnalysisMethod
 from .models.analysis import ChangeAnalysisRequest, ChangeAnalysisResponse, ChangeAnalysisRequestForm, CodeChange, ChangeAnalysisResponseWithCode
 from .models.enhanced_analysis import AnalysisRequest, EnhancedAnalysisResponse, AnalysisConfiguration
-from .utils.diff_utils import is_diff_format, extract_file_content_from_diff
+from .utils.diff_utils import is_diff_format, extract_file_content_from_diff, GitDiffExtractor
 
 # Load environment variables
 load_dotenv()
@@ -20,7 +21,7 @@ load_dotenv()
 app = FastAPI(
     title="Enhanced Code Change Impact Analysis API",
     description="Advanced API for analyzing code changes and their impact using RAG, dependency analysis, and Azure OpenAI",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # Add CORS middleware
@@ -37,6 +38,7 @@ enhanced_rag_service = EnhancedRAGService()
 rag_service = enhanced_rag_service  # Backward compatibility
 openai_service = AzureOpenAIService()
 performance_analyzer = PerformanceAnalyzer()
+smart_analysis_service = SmartAnalysisService()
 
 # Conditionally initialize ADO service
 ENABLE_ADO_INTEGRATION = os.getenv("ENABLE_ADO_INTEGRATION", "false").lower() == "true"
@@ -50,15 +52,129 @@ async def health_check():
     """Enhanced health check endpoint"""
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "features": {
             "ado_integration": ENABLE_ADO_INTEGRATION,
             "enhanced_rag": True,
             "dependency_analysis": True,
             "performance_analysis": True,
+            "smart_analysis": True,
+            "hybrid_diff_analysis": True,
             "caching": analysis_config.enable_caching
         }
     }
+
+@app.post("/analyze/smart")
+async def analyze_changes_smart(
+    files: List[UploadFile] = File(...),
+    analysis_method: str = Form(default="auto"),  # auto, ast_only, llm_only, hybrid
+    include_performance: bool = Form(default=False),
+    update_ado: bool = Form(default=False),
+    ado_item_id: str = Form(default=None)
+):
+    """
+    Smart analysis endpoint that chooses the best analysis method
+    """
+    try:
+        # Validate ADO integration request
+        if update_ado and not ENABLE_ADO_INTEGRATION:
+            raise HTTPException(
+                status_code=400,
+                detail="Azure DevOps integration is disabled. Set ENABLE_ADO_INTEGRATION=true to enable it."
+            )
+
+        # Parse analysis method
+        try:
+            method = AnalysisMethod(analysis_method.lower())
+        except ValueError:
+            method = AnalysisMethod.AUTO
+
+        results = []
+        
+        for file in files:
+            content = await file.read()
+            text_content = content.decode('utf-8')
+            
+            # Check if it's a diff format
+            if is_diff_format(text_content):
+                # Extract file changes from diff
+                file_changes = GitDiffExtractor.extract_file_changes(text_content)
+                
+                for file_path, changes in file_changes.items():
+                    old_content = changes['old_content']
+                    new_content = changes['new_content']
+                    
+                    # Perform smart analysis
+                    analysis_result = await smart_analysis_service.analyze_code_changes(
+                        file_path, old_content, new_content, method
+                    )
+                    
+                    results.append({
+                        "file_path": file_path,
+                        "analysis_method": analysis_result.method_used.value,
+                        "summary": analysis_result.summary,
+                        "confidence_score": analysis_result.confidence_score,
+                        "function_changes": [
+                            {
+                                "name": change.name,
+                                "change_type": change.change_type.value,
+                                "has_old_content": change.old_content is not None,
+                                "has_new_content": change.new_content is not None
+                            }
+                            for change in analysis_result.function_changes
+                        ],
+                        "recommendations": analysis_result.recommendations,
+                        "performance_impact": analysis_result.performance_impact,
+                        "risk_level": analysis_result.risk_level
+                    })
+            else:
+                # Regular file content - create a mock comparison
+                analysis_result = await smart_analysis_service.analyze_code_changes(
+                    file.filename, "", text_content, method
+                )
+                
+                results.append({
+                    "file_path": file.filename,
+                    "analysis_method": analysis_result.method_used.value,
+                    "summary": analysis_result.summary,
+                    "confidence_score": analysis_result.confidence_score,
+                    "function_changes": [
+                        {
+                            "name": change.name,
+                            "change_type": change.change_type.value,
+                            "has_old_content": change.old_content is not None,
+                            "has_new_content": change.new_content is not None
+                        }
+                        for change in analysis_result.function_changes
+                    ],
+                    "recommendations": analysis_result.recommendations,
+                    "performance_impact": analysis_result.performance_impact,
+                    "risk_level": analysis_result.risk_level
+                })
+
+        # Performance analysis if requested
+        performance_results = []
+        if include_performance:
+            perf_changes = []
+            for file in files:
+                content = await file.read()
+                text_content = content.decode('utf-8')
+                perf_changes.append({
+                    "file_path": file.filename,
+                    "content": text_content
+                })
+            
+            performance_results = performance_analyzer.analyze_performance_impact(perf_changes)
+
+        return {
+            "analysis_results": results,
+            "performance_analysis": performance_results if include_performance else None,
+            "overall_risk": _calculate_overall_risk(results),
+            "recommendations": _generate_overall_recommendations(results)
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
 async def analyze_changes_enhanced(
@@ -274,6 +390,39 @@ async def update_configuration(config: AnalysisConfiguration):
     global analysis_config
     analysis_config = config
     return {"status": "Configuration updated successfully"}
+
+def _calculate_overall_risk(results: List[Dict]) -> str:
+    """Calculate overall risk from analysis results"""
+    risk_scores = {"low": 1, "medium": 2, "high": 3}
+    
+    if not results:
+        return "low"
+    
+    max_risk = max(risk_scores.get(result.get("risk_level", "low"), 1) for result in results)
+    
+    for level, score in risk_scores.items():
+        if score == max_risk:
+            return level
+    
+    return "medium"
+
+def _generate_overall_recommendations(results: List[Dict]) -> List[str]:
+    """Generate overall recommendations from analysis results"""
+    all_recommendations = []
+    
+    for result in results:
+        all_recommendations.extend(result.get("recommendations", []))
+    
+    # Remove duplicates while preserving order
+    unique_recommendations = []
+    seen = set()
+    
+    for rec in all_recommendations:
+        if rec not in seen:
+            unique_recommendations.append(rec)
+            seen.add(rec)
+    
+    return unique_recommendations
 
 if __name__ == "__main__":
     import uvicorn
