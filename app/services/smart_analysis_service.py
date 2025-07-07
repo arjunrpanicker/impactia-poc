@@ -3,19 +3,30 @@ Smart analysis service that decides between AST and LLM analysis
 """
 import os
 import re
+import ast
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 
-from .diff_service import HybridDiffAnalyzer, FunctionChange, ChangeType
 from .azure_openai_service import AzureOpenAIService
-from ..utils.diff_utils import GitDiffExtractor
 
 class AnalysisMethod(Enum):
     AST_ONLY = "ast_only"
     LLM_ONLY = "llm_only"
     HYBRID = "hybrid"
     AUTO = "auto"
+
+class ChangeType(Enum):
+    ADDED = "added"
+    MODIFIED = "modified"
+    DELETED = "deleted"
+
+@dataclass
+class FunctionChange:
+    name: str
+    change_type: ChangeType
+    old_content: Optional[str] = None
+    new_content: Optional[str] = None
 
 @dataclass
 class AnalysisResult:
@@ -31,7 +42,6 @@ class SmartAnalysisService:
     """Service that intelligently chooses between AST and LLM analysis"""
     
     def __init__(self):
-        self.hybrid_analyzer = HybridDiffAnalyzer()
         self.openai_service = AzureOpenAIService()
         
         # Configuration thresholds
@@ -57,6 +67,7 @@ class SmartAnalysisService:
         
         # Handle empty content cases
         if not old_content and not new_content:
+            print(f"[DEBUG] Both contents empty for {file_path}")
             return AnalysisResult(
                 method_used=method,
                 function_changes=[],
@@ -69,10 +80,12 @@ class SmartAnalysisService:
         
         # If only new content (file addition)
         if not old_content and new_content:
+            print(f"[DEBUG] New file detected: {file_path}")
             return await self._analyze_new_file(file_path, new_content, method)
         
         # If only old content (file deletion)
         if old_content and not new_content:
+            print(f"[DEBUG] File deletion detected: {file_path}")
             return await self._analyze_deleted_file(file_path, old_content, method)
         
         # Determine the best analysis method
@@ -91,6 +104,8 @@ class SmartAnalysisService:
                 return await self._hybrid_analysis(file_path, old_content, new_content)
         except Exception as e:
             print(f"[DEBUG] Analysis failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             # Return fallback result
             return AnalysisResult(
                 method_used=method,
@@ -104,63 +119,92 @@ class SmartAnalysisService:
 
     async def _analyze_new_file(self, file_path: str, content: str, method: AnalysisMethod) -> AnalysisResult:
         """Analyze a newly added file"""
+        print(f"[DEBUG] Analyzing new file: {file_path}")
+        
         functions = self._extract_functions_from_content(content, file_path)
+        print(f"[DEBUG] Found {len(functions)} functions in new file")
         
         function_changes = [
             FunctionChange(
                 name=func_name,
                 change_type=ChangeType.ADDED,
-                new_content=func_content
+                new_content=func_content[:200] + "..." if len(func_content) > 200 else func_content
             )
             for func_name, func_content in functions.items()
         ]
         
+        # If no functions found, analyze content type
+        if not functions:
+            # Check if it's a code file with other content
+            if self._is_code_file(file_path):
+                summary = f"New code file added: {file_path} (no functions detected)"
+                recommendations = ["Review file structure", "Consider adding functions if needed"]
+            else:
+                summary = f"New file added: {file_path}"
+                recommendations = ["Review file content and purpose"]
+        else:
+            summary = f"New file added with {len(functions)} function(s): {', '.join(functions.keys())}"
+            recommendations = ["Add test coverage for new functions", "Review code for best practices"]
+        
         return AnalysisResult(
             method_used=method,
             function_changes=function_changes,
-            summary=f"New file added with {len(functions)} function(s)",
+            summary=summary,
             confidence_score=0.9,
-            recommendations=["Add test coverage for new functions", "Review code for best practices"],
+            recommendations=recommendations,
             performance_impact="low" if len(functions) < 5 else "medium",
             risk_level="low" if len(functions) < 3 else "medium"
         )
 
     async def _analyze_deleted_file(self, file_path: str, content: str, method: AnalysisMethod) -> AnalysisResult:
         """Analyze a deleted file"""
+        print(f"[DEBUG] Analyzing deleted file: {file_path}")
+        
         functions = self._extract_functions_from_content(content, file_path)
+        print(f"[DEBUG] Found {len(functions)} functions in deleted file")
         
         function_changes = [
             FunctionChange(
                 name=func_name,
                 change_type=ChangeType.DELETED,
-                old_content=func_content
+                old_content=func_content[:200] + "..." if len(func_content) > 200 else func_content
             )
             for func_name, func_content in functions.items()
         ]
         
+        summary = f"File deleted with {len(functions)} function(s): {', '.join(functions.keys())}" if functions else f"File deleted: {file_path}"
+        
         return AnalysisResult(
             method_used=method,
             function_changes=function_changes,
-            summary=f"File deleted with {len(functions)} function(s)",
+            summary=summary,
             confidence_score=0.9,
             recommendations=["Verify no breaking changes", "Update dependent code", "Remove related tests"],
             performance_impact="low",
             risk_level="high" if len(functions) > 0 else "medium"
         )
 
+    def _is_code_file(self, file_path: str) -> bool:
+        """Check if file is a code file"""
+        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.cs', '.java', '.cpp', '.c', '.h', '.go', '.rs', '.rb', '.php'}
+        return os.path.splitext(file_path)[1].lower() in code_extensions
+
     def _extract_functions_from_content(self, content: str, file_path: str) -> Dict[str, str]:
         """Extract functions from content using regex patterns"""
+        print(f"[DEBUG] Extracting functions from {file_path}")
+        
         functions = {}
         file_ext = os.path.splitext(file_path)[1].lower()
         
         # Language-specific patterns
         patterns = {
             '.py': r'def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*:',
-            '.js': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)',
-            '.ts': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*:\s*[^=]*=>)',
-            '.jsx': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)',
-            '.tsx': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*:\s*[^=]*=>)',
+            '.js': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)',
+            '.ts': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::\s*[^=]*)?=>)',
+            '.jsx': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)',
+            '.tsx': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*(?::\s*[^=]*)?=>)',
             '.cs': r'(?:public|private|protected|internal)?\s*(?:static\s+)?(?:async\s+)?[a-zA-Z_<>[\]]+\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)',
+            '.java': r'(?:public|private|protected)?\s*(?:static\s+)?(?:final\s+)?[a-zA-Z_<>[\]]+\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)',
         }
         
         pattern = patterns.get(file_ext, r'(?:def|function|const)\s+([a-zA-Z_][a-zA-Z0-9_]*)')
@@ -172,10 +216,12 @@ class SmartAnalysisService:
                 # Get the first non-None group (function name)
                 func_name = next((group for group in match.groups() if group), None)
                 if func_name:
+                    print(f"[DEBUG] Found function: {func_name} at line {i+1}")
                     # Extract function content (simple heuristic)
                     func_content = self._extract_function_content(lines, i, file_ext)
                     functions[func_name] = func_content
         
+        print(f"[DEBUG] Extracted {len(functions)} functions: {list(functions.keys())}")
         return functions
 
     def _extract_function_content(self, lines: List[str], start_line: int, file_ext: str) -> str:
@@ -230,6 +276,7 @@ class SmartAnalysisService:
         ast_supported = {'.py', '.js', '.ts', '.jsx', '.tsx'}
         
         if file_ext not in ast_supported:
+            print(f"[DEBUG] File extension {file_ext} not supported by AST, using LLM")
             return AnalysisMethod.LLM_ONLY
         
         # Content size considerations
@@ -238,15 +285,18 @@ class SmartAnalysisService:
         total_lines = max(old_lines, new_lines)
         
         if total_lines > self.config['max_lines_for_ast']:
+            print(f"[DEBUG] File too large ({total_lines} lines), using LLM")
             return AnalysisMethod.LLM_ONLY
         
         # Complexity considerations
         change_complexity = self._assess_change_complexity(old_content, new_content)
         
         if change_complexity > self.config['complex_change_threshold']:
+            print(f"[DEBUG] Complex changes detected ({change_complexity}), using hybrid")
             return AnalysisMethod.HYBRID
         
         # Default to AST for supported languages with simple changes
+        print(f"[DEBUG] Using AST for simple changes")
         return AnalysisMethod.AST_ONLY
 
     def _assess_change_complexity(self, old_content: str, new_content: str) -> int:
@@ -280,42 +330,45 @@ class SmartAnalysisService:
         """Perform AST-based analysis"""
         try:
             print(f"[DEBUG] Starting AST analysis for {file_path}")
-            changes = self.hybrid_analyzer.ast_analyzer.analyze_function_changes(
-                file_path, old_content, new_content
-            )
+            
+            # Extract functions from both versions
+            old_functions = self._extract_functions_from_content(old_content, file_path)
+            new_functions = self._extract_functions_from_content(new_content, file_path)
+            
+            print(f"[DEBUG] Old functions: {list(old_functions.keys())}")
+            print(f"[DEBUG] New functions: {list(new_functions.keys())}")
+            
+            changes = []
+            
+            # Find all function names
+            all_function_names = set(old_functions.keys()) | set(new_functions.keys())
+            
+            for name in all_function_names:
+                if name in old_functions and name in new_functions:
+                    # Function exists in both - check if modified
+                    if self._normalize_content(old_functions[name]) != self._normalize_content(new_functions[name]):
+                        changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.MODIFIED,
+                            old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name],
+                            new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                        ))
+                elif name in new_functions:
+                    # Function added
+                    changes.append(FunctionChange(
+                        name=name,
+                        change_type=ChangeType.ADDED,
+                        new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                    ))
+                elif name in old_functions:
+                    # Function deleted
+                    changes.append(FunctionChange(
+                        name=name,
+                        change_type=ChangeType.DELETED,
+                        old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name]
+                    ))
             
             print(f"[DEBUG] AST found {len(changes)} changes")
-            
-            # If AST didn't find changes, try regex fallback
-            if not changes:
-                print(f"[DEBUG] AST found no changes, trying regex fallback")
-                old_functions = self._extract_functions_from_content(old_content, file_path)
-                new_functions = self._extract_functions_from_content(new_content, file_path)
-                
-                # Compare functions
-                all_function_names = set(old_functions.keys()) | set(new_functions.keys())
-                
-                for name in all_function_names:
-                    if name in old_functions and name in new_functions:
-                        if old_functions[name] != new_functions[name]:
-                            changes.append(FunctionChange(
-                                name=name,
-                                change_type=ChangeType.MODIFIED,
-                                old_content=old_functions[name],
-                                new_content=new_functions[name]
-                            ))
-                    elif name in new_functions:
-                        changes.append(FunctionChange(
-                            name=name,
-                            change_type=ChangeType.ADDED,
-                            new_content=new_functions[name]
-                        ))
-                    elif name in old_functions:
-                        changes.append(FunctionChange(
-                            name=name,
-                            change_type=ChangeType.DELETED,
-                            old_content=old_functions[name]
-                        ))
             
             summary = self._generate_ast_summary(changes)
             confidence = self._calculate_ast_confidence(changes, old_content, new_content)
@@ -333,15 +386,57 @@ class SmartAnalysisService:
             
         except Exception as e:
             print(f"[DEBUG] AST analysis failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             # Fallback to LLM if AST fails
             return await self._llm_analysis(file_path, old_content, new_content)
+
+    def _normalize_content(self, content: str) -> str:
+        """Normalize content for comparison"""
+        # Remove extra whitespace and normalize line endings
+        return re.sub(r'\s+', ' ', content).strip()
 
     async def _llm_analysis(self, file_path: str, old_content: str, new_content: str) -> AnalysisResult:
         """Perform LLM-based analysis"""
         try:
             print(f"[DEBUG] Starting LLM analysis for {file_path}")
-            llm_result = self.hybrid_analyzer._get_llm_analysis(old_content, new_content, file_path)
             
+            # Prepare prompt for LLM
+            prompt = f"""
+Analyze the changes in this file: {file_path}
+
+OLD VERSION:
+```
+{old_content[:1500] if old_content else "No previous content (new file)"}
+```
+
+NEW VERSION:
+```
+{new_content[:1500] if new_content else "No content (file deleted)"}
+```
+
+Please provide:
+1. A summary of what changed
+2. List of functions/methods that were added, modified, or deleted
+3. Risk level (low/medium/high)
+4. Performance impact (low/medium/high)
+5. Recommendations
+
+Keep the response concise and structured.
+"""
+            
+            # Get LLM analysis
+            response = await self.openai_service.client.chat.completions.create(
+                model=self.openai_service.deployment_name,
+                messages=[
+                    {"role": "system", "content": "You are a code analysis expert. Provide concise, actionable insights about code changes."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=800
+            )
+            
+            llm_result = response.choices[0].message.content.strip()
             print(f"[DEBUG] LLM result: {llm_result[:200]}...")
             
             # Parse LLM result to extract structured information
@@ -359,13 +454,15 @@ class SmartAnalysisService:
             
         except Exception as e:
             print(f"[DEBUG] LLM analysis failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             # Return minimal result if LLM fails
             return AnalysisResult(
                 method_used=AnalysisMethod.LLM_ONLY,
                 function_changes=[],
-                summary=f"Analysis failed: {str(e)}",
+                summary=f"LLM analysis failed: {str(e)}. Manual review recommended.",
                 confidence_score=0.0,
-                recommendations=["Manual review recommended"],
+                recommendations=["Manual review recommended due to analysis failure"],
                 performance_impact="unknown",
                 risk_level="medium"
             )
@@ -408,11 +505,14 @@ class SmartAnalysisService:
         
         summary_parts = []
         if added:
-            summary_parts.append(f"{added} function(s) added")
+            added_names = [c.name for c in changes if c.change_type == ChangeType.ADDED]
+            summary_parts.append(f"{added} function(s) added: {', '.join(added_names)}")
         if modified:
-            summary_parts.append(f"{modified} function(s) modified")
+            modified_names = [c.name for c in changes if c.change_type == ChangeType.MODIFIED]
+            summary_parts.append(f"{modified} function(s) modified: {', '.join(modified_names)}")
         if deleted:
-            summary_parts.append(f"{deleted} function(s) deleted")
+            deleted_names = [c.name for c in changes if c.change_type == ChangeType.DELETED]
+            summary_parts.append(f"{deleted} function(s) deleted: {', '.join(deleted_names)}")
         
         return "; ".join(summary_parts) if summary_parts else "Functions analyzed but no significant changes detected"
 
@@ -445,6 +545,10 @@ class SmartAnalysisService:
         deleted_functions = [c for c in changes if c.change_type == ChangeType.DELETED]
         if deleted_functions:
             recommendations.append("Functions deleted - verify no breaking changes for dependent code")
+        
+        modified_functions = [c for c in changes if c.change_type == ChangeType.MODIFIED]
+        if modified_functions:
+            recommendations.append("Functions modified - review changes and update tests")
         
         if not recommendations:
             recommendations.append("Review changes for correctness and test coverage")

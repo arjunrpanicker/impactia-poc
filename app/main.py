@@ -102,6 +102,16 @@ async def analyze_changes_smart(
                 text_content = content.decode('utf-8')
             except UnicodeDecodeError:
                 print(f"[DEBUG] Failed to decode {file.filename} as UTF-8")
+                results.append({
+                    "file_path": file.filename,
+                    "analysis_method": "error",
+                    "summary": f"Failed to decode file {file.filename} as UTF-8",
+                    "confidence_score": 0.0,
+                    "function_changes": [],
+                    "recommendations": ["File encoding issue - manual review required"],
+                    "performance_impact": "unknown",
+                    "risk_level": "medium"
+                })
                 continue
             
             print(f"[DEBUG] File content length: {len(text_content)}")
@@ -135,7 +145,9 @@ async def analyze_changes_smart(
                                 "name": change.name,
                                 "change_type": change.change_type.value,
                                 "has_old_content": change.old_content is not None,
-                                "has_new_content": change.new_content is not None
+                                "has_new_content": change.new_content is not None,
+                                "old_content_preview": change.old_content[:100] + "..." if change.old_content and len(change.old_content) > 100 else change.old_content,
+                                "new_content_preview": change.new_content[:100] + "..." if change.new_content and len(change.new_content) > 100 else change.new_content
                             }
                             for change in analysis_result.function_changes
                         ],
@@ -160,7 +172,9 @@ async def analyze_changes_smart(
                             "name": change.name,
                             "change_type": change.change_type.value,
                             "has_old_content": change.old_content is not None,
-                            "has_new_content": change.new_content is not None
+                            "has_new_content": change.new_content is not None,
+                            "old_content_preview": change.old_content[:100] + "..." if change.old_content and len(change.old_content) > 100 else change.old_content,
+                            "new_content_preview": change.new_content[:100] + "..." if change.new_content and len(change.new_content) > 100 else change.new_content
                         }
                         for change in analysis_result.function_changes
                     ],
@@ -194,7 +208,13 @@ async def analyze_changes_smart(
             "analysis_results": results,
             "performance_analysis": performance_results if include_performance else None,
             "overall_risk": _calculate_overall_risk(results),
-            "recommendations": _generate_overall_recommendations(results)
+            "recommendations": _generate_overall_recommendations(results),
+            "total_files_analyzed": len(results),
+            "analysis_summary": {
+                "files_with_changes": len([r for r in results if r["function_changes"]]),
+                "total_function_changes": sum(len(r["function_changes"]) for r in results),
+                "methods_used": list(set(r["analysis_method"] for r in results))
+            }
         }
         
         print(f"[DEBUG] Returning response with {len(results)} analysis results")
@@ -204,7 +224,7 @@ async def analyze_changes_smart(
         print(f"[DEBUG] Error in smart analysis: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
 async def analyze_changes_enhanced(
@@ -451,6 +471,14 @@ def _generate_overall_recommendations(results: List[Dict]) -> List[str]:
         if rec not in seen:
             unique_recommendations.append(rec)
             seen.add(rec)
+    
+    # If no recommendations, add default ones
+    if not unique_recommendations:
+        unique_recommendations = [
+            "Review all changes thoroughly",
+            "Ensure adequate test coverage",
+            "Consider impact on dependent systems"
+        ]
     
     return unique_recommendations
 
