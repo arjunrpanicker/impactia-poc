@@ -119,10 +119,61 @@ async def analyze_changes_smart(
             # Check if it's a diff format
             if is_diff_format(text_content):
                 print(f"[DEBUG] File {file.filename} is in diff format")
-                # Extract file changes from diff
+                
+                # Try primary extraction method
                 file_changes = GitDiffExtractor.extract_file_changes(text_content)
                 
+                # If primary method fails, try unified diff parser
+                if not file_changes:
+                    print(f"[DEBUG] Primary extraction failed, trying unified diff parser")
+                    file_changes = GitDiffExtractor.parse_unified_diff(text_content)
+                
+                # If still no results, try to extract content manually
+                if not file_changes:
+                    print(f"[DEBUG] All extraction methods failed, trying manual extraction")
+                    # Look for any content that looks like code
+                    lines = text_content.split('\n')
+                    old_content = []
+                    new_content = []
+                    
+                    for line in lines:
+                        if line.startswith(' '):
+                            old_content.append(line[1:])
+                            new_content.append(line[1:])
+                        elif line.startswith('-'):
+                            old_content.append(line[1:])
+                        elif line.startswith('+'):
+                            new_content.append(line[1:])
+                    
+                    if old_content or new_content:
+                        file_changes = {
+                            file.filename: {
+                                'old_content': '\n'.join(old_content),
+                                'new_content': '\n'.join(new_content)
+                            }
+                        }
+                        print(f"[DEBUG] Manual extraction found content: old={len(old_content)} lines, new={len(new_content)} lines")
+                
                 print(f"[DEBUG] Extracted {len(file_changes)} file changes from diff")
+                
+                if not file_changes:
+                    # If we still can't extract anything, create a fallback analysis
+                    print(f"[DEBUG] No file changes extracted, creating fallback analysis")
+                    results.append({
+                        "file_path": file.filename,
+                        "analysis_method": "fallback",
+                        "summary": f"Diff file detected but could not extract specific file changes. Manual review recommended.",
+                        "confidence_score": 0.3,
+                        "function_changes": [],
+                        "recommendations": [
+                            "Manual review of diff file required",
+                            "Check diff format compatibility",
+                            "Verify file contains valid changes"
+                        ],
+                        "performance_impact": "unknown",
+                        "risk_level": "medium"
+                    })
+                    continue
                 
                 for file_path, changes in file_changes.items():
                     old_content = changes['old_content']
@@ -218,6 +269,11 @@ async def analyze_changes_smart(
         }
         
         print(f"[DEBUG] Returning response with {len(results)} analysis results")
+        if results:
+            print(f"[DEBUG] Sample result: {results[0]['summary'][:100]}...")
+        else:
+            print(f"[DEBUG] Returning response with 0 analysis results but there are changes.")
+        
         return response
 
     except Exception as e:
