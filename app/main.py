@@ -76,6 +76,9 @@ async def analyze_changes_smart(
     Smart analysis endpoint that chooses the best analysis method
     """
     try:
+        print(f"[DEBUG] Smart analysis started with {len(files)} files")
+        print(f"[DEBUG] Analysis method: {analysis_method}")
+        
         # Validate ADO integration request
         if update_ado and not ENABLE_ADO_INTEGRATION:
             raise HTTPException(
@@ -92,17 +95,30 @@ async def analyze_changes_smart(
         results = []
         
         for file in files:
+            print(f"[DEBUG] Processing file: {file.filename}")
             content = await file.read()
-            text_content = content.decode('utf-8')
+            
+            try:
+                text_content = content.decode('utf-8')
+            except UnicodeDecodeError:
+                print(f"[DEBUG] Failed to decode {file.filename} as UTF-8")
+                continue
+            
+            print(f"[DEBUG] File content length: {len(text_content)}")
             
             # Check if it's a diff format
             if is_diff_format(text_content):
+                print(f"[DEBUG] File {file.filename} is in diff format")
                 # Extract file changes from diff
                 file_changes = GitDiffExtractor.extract_file_changes(text_content)
+                
+                print(f"[DEBUG] Extracted {len(file_changes)} file changes from diff")
                 
                 for file_path, changes in file_changes.items():
                     old_content = changes['old_content']
                     new_content = changes['new_content']
+                    
+                    print(f"[DEBUG] Analyzing {file_path}: old={len(old_content)} chars, new={len(new_content)} chars")
                     
                     # Perform smart analysis
                     analysis_result = await smart_analysis_service.analyze_code_changes(
@@ -128,7 +144,8 @@ async def analyze_changes_smart(
                         "risk_level": analysis_result.risk_level
                     })
             else:
-                # Regular file content - create a mock comparison
+                print(f"[DEBUG] File {file.filename} is regular content")
+                # Regular file content - treat as new file
                 analysis_result = await smart_analysis_service.analyze_code_changes(
                     file.filename, "", text_content, method
                 )
@@ -152,28 +169,41 @@ async def analyze_changes_smart(
                     "risk_level": analysis_result.risk_level
                 })
 
+        print(f"[DEBUG] Analysis completed with {len(results)} results")
+
         # Performance analysis if requested
         performance_results = []
         if include_performance:
+            print(f"[DEBUG] Running performance analysis")
             perf_changes = []
             for file in files:
                 content = await file.read()
-                text_content = content.decode('utf-8')
-                perf_changes.append({
-                    "file_path": file.filename,
-                    "content": text_content
-                })
+                try:
+                    text_content = content.decode('utf-8')
+                    perf_changes.append({
+                        "file_path": file.filename,
+                        "content": text_content
+                    })
+                except UnicodeDecodeError:
+                    continue
             
-            performance_results = performance_analyzer.analyze_performance_impact(perf_changes)
+            if perf_changes:
+                performance_results = performance_analyzer.analyze_performance_impact(perf_changes)
 
-        return {
+        response = {
             "analysis_results": results,
             "performance_analysis": performance_results if include_performance else None,
             "overall_risk": _calculate_overall_risk(results),
             "recommendations": _generate_overall_recommendations(results)
         }
+        
+        print(f"[DEBUG] Returning response with {len(results)} analysis results")
+        return response
 
     except Exception as e:
+        print(f"[DEBUG] Error in smart analysis: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)

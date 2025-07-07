@@ -2,6 +2,7 @@
 Smart analysis service that decides between AST and LLM analysis
 """
 import os
+import re
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -50,17 +51,174 @@ class SmartAnalysisService:
     ) -> AnalysisResult:
         """Analyze code changes using the most appropriate method"""
         
+        print(f"[DEBUG] Analyzing {file_path} with method {method}")
+        print(f"[DEBUG] Old content length: {len(old_content)}")
+        print(f"[DEBUG] New content length: {len(new_content)}")
+        
+        # Handle empty content cases
+        if not old_content and not new_content:
+            return AnalysisResult(
+                method_used=method,
+                function_changes=[],
+                summary="No content to analyze",
+                confidence_score=0.0,
+                recommendations=["No changes detected"],
+                performance_impact="none",
+                risk_level="low"
+            )
+        
+        # If only new content (file addition)
+        if not old_content and new_content:
+            return await self._analyze_new_file(file_path, new_content, method)
+        
+        # If only old content (file deletion)
+        if old_content and not new_content:
+            return await self._analyze_deleted_file(file_path, old_content, method)
+        
         # Determine the best analysis method
         if method == AnalysisMethod.AUTO:
             method = self._determine_best_method(file_path, old_content, new_content)
         
+        print(f"[DEBUG] Using analysis method: {method}")
+        
         # Perform analysis based on chosen method
-        if method == AnalysisMethod.AST_ONLY:
-            return await self._ast_analysis(file_path, old_content, new_content)
-        elif method == AnalysisMethod.LLM_ONLY:
-            return await self._llm_analysis(file_path, old_content, new_content)
-        else:  # HYBRID
-            return await self._hybrid_analysis(file_path, old_content, new_content)
+        try:
+            if method == AnalysisMethod.AST_ONLY:
+                return await self._ast_analysis(file_path, old_content, new_content)
+            elif method == AnalysisMethod.LLM_ONLY:
+                return await self._llm_analysis(file_path, old_content, new_content)
+            else:  # HYBRID
+                return await self._hybrid_analysis(file_path, old_content, new_content)
+        except Exception as e:
+            print(f"[DEBUG] Analysis failed: {str(e)}")
+            # Return fallback result
+            return AnalysisResult(
+                method_used=method,
+                function_changes=[],
+                summary=f"Analysis failed: {str(e)}",
+                confidence_score=0.0,
+                recommendations=["Manual review required due to analysis failure"],
+                performance_impact="unknown",
+                risk_level="medium"
+            )
+
+    async def _analyze_new_file(self, file_path: str, content: str, method: AnalysisMethod) -> AnalysisResult:
+        """Analyze a newly added file"""
+        functions = self._extract_functions_from_content(content, file_path)
+        
+        function_changes = [
+            FunctionChange(
+                name=func_name,
+                change_type=ChangeType.ADDED,
+                new_content=func_content
+            )
+            for func_name, func_content in functions.items()
+        ]
+        
+        return AnalysisResult(
+            method_used=method,
+            function_changes=function_changes,
+            summary=f"New file added with {len(functions)} function(s)",
+            confidence_score=0.9,
+            recommendations=["Add test coverage for new functions", "Review code for best practices"],
+            performance_impact="low" if len(functions) < 5 else "medium",
+            risk_level="low" if len(functions) < 3 else "medium"
+        )
+
+    async def _analyze_deleted_file(self, file_path: str, content: str, method: AnalysisMethod) -> AnalysisResult:
+        """Analyze a deleted file"""
+        functions = self._extract_functions_from_content(content, file_path)
+        
+        function_changes = [
+            FunctionChange(
+                name=func_name,
+                change_type=ChangeType.DELETED,
+                old_content=func_content
+            )
+            for func_name, func_content in functions.items()
+        ]
+        
+        return AnalysisResult(
+            method_used=method,
+            function_changes=function_changes,
+            summary=f"File deleted with {len(functions)} function(s)",
+            confidence_score=0.9,
+            recommendations=["Verify no breaking changes", "Update dependent code", "Remove related tests"],
+            performance_impact="low",
+            risk_level="high" if len(functions) > 0 else "medium"
+        )
+
+    def _extract_functions_from_content(self, content: str, file_path: str) -> Dict[str, str]:
+        """Extract functions from content using regex patterns"""
+        functions = {}
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        # Language-specific patterns
+        patterns = {
+            '.py': r'def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*:',
+            '.js': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)',
+            '.ts': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*:\s*[^=]*=>)',
+            '.jsx': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>)',
+            '.tsx': r'(?:function\s+([a-zA-Z_][a-zA-Z0-9_]*)|const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*:\s*[^=]*=>)',
+            '.cs': r'(?:public|private|protected|internal)?\s*(?:static\s+)?(?:async\s+)?[a-zA-Z_<>[\]]+\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)',
+        }
+        
+        pattern = patterns.get(file_ext, r'(?:def|function|const)\s+([a-zA-Z_][a-zA-Z0-9_]*)')
+        
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            matches = re.finditer(pattern, line)
+            for match in matches:
+                # Get the first non-None group (function name)
+                func_name = next((group for group in match.groups() if group), None)
+                if func_name:
+                    # Extract function content (simple heuristic)
+                    func_content = self._extract_function_content(lines, i, file_ext)
+                    functions[func_name] = func_content
+        
+        return functions
+
+    def _extract_function_content(self, lines: List[str], start_line: int, file_ext: str) -> str:
+        """Extract function content using language-specific heuristics"""
+        content_lines = [lines[start_line]]
+        
+        if file_ext == '.py':
+            # Python: use indentation
+            base_indent = len(lines[start_line]) - len(lines[start_line].lstrip())
+            
+            for i in range(start_line + 1, min(start_line + 30, len(lines))):
+                if i >= len(lines):
+                    break
+                line = lines[i]
+                if line.strip() == '':
+                    content_lines.append(line)
+                    continue
+                
+                current_indent = len(line) - len(line.lstrip())
+                if current_indent <= base_indent and line.strip():
+                    break
+                
+                content_lines.append(line)
+        else:
+            # Other languages: use braces or limited context
+            brace_count = 0
+            found_opening = False
+            
+            for i in range(start_line, min(start_line + 30, len(lines))):
+                if i >= len(lines):
+                    break
+                line = lines[i]
+                if i > start_line:
+                    content_lines.append(line)
+                
+                brace_count += line.count('{') - line.count('}')
+                if '{' in line:
+                    found_opening = True
+                
+                if found_opening and brace_count == 0:
+                    break
+        
+        return '\n'.join(content_lines)
 
     def _determine_best_method(self, file_path: str, old_content: str, new_content: str) -> AnalysisMethod:
         """Determine the best analysis method based on content characteristics"""
@@ -121,9 +279,43 @@ class SmartAnalysisService:
     async def _ast_analysis(self, file_path: str, old_content: str, new_content: str) -> AnalysisResult:
         """Perform AST-based analysis"""
         try:
+            print(f"[DEBUG] Starting AST analysis for {file_path}")
             changes = self.hybrid_analyzer.ast_analyzer.analyze_function_changes(
                 file_path, old_content, new_content
             )
+            
+            print(f"[DEBUG] AST found {len(changes)} changes")
+            
+            # If AST didn't find changes, try regex fallback
+            if not changes:
+                print(f"[DEBUG] AST found no changes, trying regex fallback")
+                old_functions = self._extract_functions_from_content(old_content, file_path)
+                new_functions = self._extract_functions_from_content(new_content, file_path)
+                
+                # Compare functions
+                all_function_names = set(old_functions.keys()) | set(new_functions.keys())
+                
+                for name in all_function_names:
+                    if name in old_functions and name in new_functions:
+                        if old_functions[name] != new_functions[name]:
+                            changes.append(FunctionChange(
+                                name=name,
+                                change_type=ChangeType.MODIFIED,
+                                old_content=old_functions[name],
+                                new_content=new_functions[name]
+                            ))
+                    elif name in new_functions:
+                        changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.ADDED,
+                            new_content=new_functions[name]
+                        ))
+                    elif name in old_functions:
+                        changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.DELETED,
+                            old_content=old_functions[name]
+                        ))
             
             summary = self._generate_ast_summary(changes)
             confidence = self._calculate_ast_confidence(changes, old_content, new_content)
@@ -140,16 +332,20 @@ class SmartAnalysisService:
             )
             
         except Exception as e:
+            print(f"[DEBUG] AST analysis failed: {str(e)}")
             # Fallback to LLM if AST fails
             return await self._llm_analysis(file_path, old_content, new_content)
 
     async def _llm_analysis(self, file_path: str, old_content: str, new_content: str) -> AnalysisResult:
         """Perform LLM-based analysis"""
         try:
+            print(f"[DEBUG] Starting LLM analysis for {file_path}")
             llm_result = self.hybrid_analyzer._get_llm_analysis(old_content, new_content, file_path)
             
+            print(f"[DEBUG] LLM result: {llm_result[:200]}...")
+            
             # Parse LLM result to extract structured information
-            function_changes = self._parse_llm_result(llm_result)
+            function_changes = self._parse_llm_result(llm_result, old_content, new_content, file_path)
             
             return AnalysisResult(
                 method_used=AnalysisMethod.LLM_ONLY,
@@ -162,6 +358,7 @@ class SmartAnalysisService:
             )
             
         except Exception as e:
+            print(f"[DEBUG] LLM analysis failed: {str(e)}")
             # Return minimal result if LLM fails
             return AnalysisResult(
                 method_used=AnalysisMethod.LLM_ONLY,
@@ -175,6 +372,8 @@ class SmartAnalysisService:
 
     async def _hybrid_analysis(self, file_path: str, old_content: str, new_content: str) -> AnalysisResult:
         """Perform hybrid AST + LLM analysis"""
+        print(f"[DEBUG] Starting hybrid analysis for {file_path}")
+        
         # Get AST analysis
         ast_result = await self._ast_analysis(file_path, old_content, new_content)
         
@@ -215,7 +414,7 @@ class SmartAnalysisService:
         if deleted:
             summary_parts.append(f"{deleted} function(s) deleted")
         
-        return "; ".join(summary_parts)
+        return "; ".join(summary_parts) if summary_parts else "Functions analyzed but no significant changes detected"
 
     def _calculate_ast_confidence(self, changes: List[FunctionChange], old_content: str, new_content: str) -> float:
         """Calculate confidence score for AST analysis"""
@@ -247,6 +446,9 @@ class SmartAnalysisService:
         if deleted_functions:
             recommendations.append("Functions deleted - verify no breaking changes for dependent code")
         
+        if not recommendations:
+            recommendations.append("Review changes for correctness and test coverage")
+        
         return recommendations
 
     def _assess_performance_impact(self, changes: List[FunctionChange]) -> str:
@@ -277,44 +479,71 @@ class SmartAnalysisService:
         else:
             return "low"
 
-    def _parse_llm_result(self, llm_result: str) -> List[FunctionChange]:
+    def _parse_llm_result(self, llm_result: str, old_content: str, new_content: str, file_path: str) -> List[FunctionChange]:
         """Parse LLM result to extract function changes"""
-        # This is a simplified parser - could be enhanced with more sophisticated NLP
         changes = []
         
-        # Look for function mentions in the LLM result
-        import re
+        # Try to extract function names from the LLM result
         function_patterns = [
-            r'function\s+(\w+)',
-            r'method\s+(\w+)',
-            r'(\w+)\s+function',
-            r'def\s+(\w+)'
+            r'function\s+`?(\w+)`?',
+            r'method\s+`?(\w+)`?',
+            r'`(\w+)`\s+function',
+            r'def\s+`?(\w+)`?',
+            r'`(\w+)\(\)`',
         ]
         
+        mentioned_functions = set()
         for pattern in function_patterns:
             matches = re.findall(pattern, llm_result, re.IGNORECASE)
-            for match in matches:
-                changes.append(FunctionChange(
-                    name=match,
-                    change_type=ChangeType.MODIFIED,  # Default assumption
-                    new_content="Content extracted from LLM analysis"
-                ))
+            mentioned_functions.update(matches)
+        
+        # If no functions mentioned in LLM result, extract from content
+        if not mentioned_functions:
+            old_functions = self._extract_functions_from_content(old_content, file_path)
+            new_functions = self._extract_functions_from_content(new_content, file_path)
+            mentioned_functions = set(old_functions.keys()) | set(new_functions.keys())
+        
+        # Create function changes based on mentioned functions
+        for func_name in mentioned_functions:
+            # Determine change type based on LLM result content
+            if "added" in llm_result.lower() or "new" in llm_result.lower():
+                change_type = ChangeType.ADDED
+            elif "deleted" in llm_result.lower() or "removed" in llm_result.lower():
+                change_type = ChangeType.DELETED
+            else:
+                change_type = ChangeType.MODIFIED
+            
+            changes.append(FunctionChange(
+                name=func_name,
+                change_type=change_type,
+                new_content="Content analyzed by LLM"
+            ))
         
         return changes
 
     def _extract_recommendations_from_llm(self, llm_result: str) -> List[str]:
         """Extract recommendations from LLM result"""
-        # Simple extraction - could be enhanced
         recommendations = []
         
-        if "test" in llm_result.lower():
+        result_lower = llm_result.lower()
+        
+        if "test" in result_lower:
             recommendations.append("Update test cases to reflect changes")
         
-        if "breaking" in llm_result.lower():
+        if "breaking" in result_lower:
             recommendations.append("Review for potential breaking changes")
         
-        if "performance" in llm_result.lower():
+        if "performance" in result_lower:
             recommendations.append("Consider performance implications")
+        
+        if "security" in result_lower:
+            recommendations.append("Review security implications")
+        
+        if "documentation" in result_lower or "comment" in result_lower:
+            recommendations.append("Update documentation and comments")
+        
+        if not recommendations:
+            recommendations.append("Review changes thoroughly before deployment")
         
         return recommendations
 
@@ -324,7 +553,7 @@ class SmartAnalysisService:
         
         if "high" in result_lower and "performance" in result_lower:
             return "high"
-        elif "performance" in result_lower:
+        elif "performance" in result_lower or "optimization" in result_lower:
             return "medium"
         else:
             return "low"
@@ -337,8 +566,10 @@ class SmartAnalysisService:
             return "high"
         elif "medium risk" in result_lower or "moderate" in result_lower:
             return "medium"
-        else:
+        elif "low risk" in result_lower:
             return "low"
+        else:
+            return "medium"  # Default
 
     def _combine_risk_levels(self, ast_risk: str, llm_risk: str) -> str:
         """Combine risk levels from AST and LLM analysis"""
