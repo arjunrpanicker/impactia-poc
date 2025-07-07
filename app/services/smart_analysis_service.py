@@ -425,8 +425,8 @@ Please provide:
 Keep the response concise and structured.
 """
             
-            # Get LLM analysis
-            response = await self.openai_service.client.chat.completions.create(
+            # Get LLM analysis - REMOVED await since OpenAI client is synchronous
+            response = self.openai_service.client.chat.completions.create(
                 model=self.openai_service.deployment_name,
                 messages=[
                     {"role": "system", "content": "You are a code analysis expert. Provide concise, actionable insights about code changes."},
