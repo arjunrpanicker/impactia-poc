@@ -4,13 +4,18 @@ Enhanced RAG service with better similarity search and caching
 import os
 import hashlib
 import json
+import zipfile
+import tempfile
+import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from supabase import create_client, Client
+from fastapi import UploadFile
 from ..services.azure_openai_service import AzureOpenAIService
 from ..services.code_parser import CodeParser
 from ..services.dependency_analyzer import DependencyAnalyzer
-from ..models.analysis import CodeChange
+from ..models.analysis import CodeChange, IndexingResult
+import networkx as nx
 
 class EnhancedRAGService:
     def __init__(self):
@@ -22,6 +27,268 @@ class EnhancedRAGService:
         self.parser = CodeParser()
         self.dependency_analyzer = DependencyAnalyzer()
         self.cache_ttl = timedelta(hours=1)
+        self.batch_size = 20
+        self.skip_tests = True
+
+    async def index_repository(self, file: UploadFile) -> IndexingResult:
+        """Index repository code into Supabase vector store"""
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save and extract zip
+                zip_path = os.path.join(temp_dir, "repo.zip")
+                with open(zip_path, "wb") as f:
+                    content = await file.read()
+                    f.write(content)
+
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
+
+                # Get all code files
+                code_files = []
+                for root, _, files in os.walk(temp_dir):
+                    for filename in files:
+                        if self._should_skip_file(filename, root):
+                            continue
+                        file_path = os.path.join(root, filename)
+                        try:
+                            # Quick check if file is readable and not empty
+                            if os.path.getsize(file_path) > 0:
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    f.readline()  # Try reading first line
+                                code_files.append((file_path, os.path.relpath(file_path, temp_dir)))
+                        except (IOError, UnicodeDecodeError):
+                            continue
+
+                total_files = len(code_files)
+                print(f"Found {total_files} code files to process...")
+
+                # Process files in batches
+                indexed_files = 0
+                total_methods = 0
+                embedding_count = 0
+
+                for i in range(0, len(code_files), self.batch_size):
+                    batch = code_files[i:i + self.batch_size]
+                    results = await asyncio.gather(
+                        *[self._process_file(file_path, relative_path) 
+                          for file_path, relative_path in batch],
+                        return_exceptions=True
+                    )
+
+                    # Process results
+                    for result in results:
+                        if isinstance(result, Exception):
+                            continue
+                        if result:
+                            indexed_files += 1
+                            total_methods += result[0]
+                            embedding_count += result[1]
+
+                    print(f"Processed {indexed_files}/{total_files} files...")
+
+                return IndexingResult(
+                    indexed_files=indexed_files,
+                    total_methods=total_methods,
+                    embedding_count=embedding_count
+                )
+
+        except Exception as e:
+            raise Exception(f"Failed to index repository: {str(e)}")
+
+    def _should_skip_file(self, filename: str, root: str) -> bool:
+        """Determine if a file should be skipped"""
+        # Skip hidden files
+        if filename.startswith('.'):
+            return True
+
+        # Skip test files if configured, but be more precise
+        if self.skip_tests and any(pattern in filename.lower() for pattern in [
+            'test.', '.test.', '.spec.', '.tests.',
+            'mock.', '.mock.', '.fixture.'
+        ]):
+            return True
+
+        # Skip binary and large files
+        skip_extensions = {
+            # Binary files
+            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg',
+            '.woff', '.woff2', '.ttf', '.eot', '.otf',
+            '.mp4', '.mp3', '.wav', '.avi', '.mov',
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.zip', '.rar', '.7z', '.tar', '.gz',
+            '.exe', '.dll', '.so', '.dylib',
+            # Generated files
+            '.min.js', '.min.css', '.map',
+            # Large data files
+            '.csv', '.dat', '.log', '.dump'
+        }
+        
+        if any(filename.lower().endswith(ext) for ext in skip_extensions):
+            return True
+
+        # Skip only specific binary and generated file patterns
+        skip_patterns = {
+            'node_modules/',
+            '/dist/',
+            '/build/',
+            '/bin/',
+            '/obj/',
+            '/vendor/',
+            '/third_party/',
+            '/.git/',
+            '/.vs/',
+            '/.idea/',
+            '/wwwroot/fonts/',
+            '/wwwroot/images/',
+            '/wwwroot/css/',
+            '/wwwroot/js/'
+        }
+        
+        normalized_path = root.replace('\\', '/').lower()
+        return any(pattern in normalized_path + '/' for pattern in skip_patterns)
+
+    async def _process_file(self, file_path: str, relative_path: str) -> tuple[int, int]:
+        """Process a single file and return (methods_count, embeddings_count)"""
+        try:
+            # Check file size (skip if too large)
+            file_size = os.path.getsize(file_path)
+            if file_size > 100 * 1024:  # Skip files larger than 100KB
+                print(f"Skipping large file {relative_path} ({file_size/1024:.1f}KB)")
+                return 0, 0
+
+            # Try different encodings
+            encodings = ['utf-8', 'utf-16', 'latin1', 'cp1252']
+            content = None
+            
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                        # Check if content is binary (contains null bytes or too many non-printable chars)
+                        if '\x00' in content or sum(not c.isprintable() for c in content) > len(content) * 0.3:
+                            print(f"Skipping binary file {relative_path}")
+                            return 0, 0
+                        break
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    print(f"Error reading file {relative_path} with {encoding}: {str(e)}")
+                    continue
+            
+            if content is None:
+                print(f"Could not read file {relative_path} with any encoding")
+                return 0, 0
+
+            # Extract methods if it's a source code file
+            methods = []
+            if any(relative_path.lower().endswith(ext) for ext in ['.py', '.js', '.ts', '.cs', '.java', '.cpp', '.go']):
+                methods = self._extract_methods(content)
+            
+            # Generate embedding for the file content
+            try:
+                # Truncate content if too long (approximately 6000 tokens)
+                if len(content) > 24000:  # Rough estimate: 1 token ≈ 4 characters
+                    content = content[:24000] + "\n... (content truncated due to length)"
+                
+                file_embedding = await self.openai_service.get_embeddings(content)
+            except Exception as e:
+                print(f"Error generating embedding for {relative_path}: {str(e)}")
+                return 0, 0
+
+            # Store file embedding with methods in metadata
+            await self._store_embeddings(
+                embeddings=file_embedding,
+                metadata={
+                    "type": "file",
+                    "path": relative_path,
+                    "size": len(content),
+                    "methods": [
+                        {
+                            "name": method["name"],
+                            "content": method["content"],
+                            "start_line": method.get("start_line", 0)
+                        }
+                        for method in methods
+                    ],
+                    "file_type": os.path.splitext(relative_path)[1].lower()
+                },
+                content=content,
+                file_path=relative_path,
+                code_type="file"
+            )
+
+            return len(methods), 1
+
+        except Exception as e:
+            print(f"Error processing file {relative_path}: {str(e)}")
+            return 0, 0
+
+    def _extract_methods(self, content: str) -> List[Dict[str, str]]:
+        """Extract methods from code content"""
+        import re
+        
+        methods = []
+        lines = content.split('\n')
+        
+        # Match common method patterns
+        patterns = [
+            # Python
+            (r'def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)\s*:', 1),
+            # JavaScript/TypeScript
+            (r'(async\s+)?function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)', 2),
+            # C#/Java
+            (r'(public|private|protected|internal)?\s+[a-zA-Z_<>[\]]+\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\([^)]*\)', 2),
+        ]
+        
+        for i, line in enumerate(lines, 1):
+            for pattern, group_idx in patterns:
+                matches = re.finditer(pattern, line)
+                for match in matches:
+                    method_name = match.group(group_idx)
+                    
+                    # Extract complete function using regex
+                    if pattern.startswith('def'):  # Python function
+                        # Find the complete function definition
+                        func_pattern = rf'def\s+{re.escape(method_name)}\s*\([^)]*\)\s*:.*?(?=\n\s*def|\n\s*class|\Z)'
+                        func_match = re.search(func_pattern, content, re.DOTALL | re.MULTILINE)
+                        if func_match:
+                            method_content = func_match.group(0)
+                        else:
+                            # Fallback to context window
+                            start_line = max(0, i - 5)
+                            end_line = min(len(lines), i + 50)  # Increased context
+                            method_content = '\n'.join(lines[start_line:end_line])
+                    else:
+                        # For non-Python, use larger context window
+                        start_line = max(0, i - 5)
+                        end_line = min(len(lines), i + 50)
+                        method_content = '\n'.join(lines[start_line:end_line])
+                    
+                    methods.append({
+                        "name": method_name,
+                        "content": method_content,
+                        "start_line": i
+                    })
+        
+        return methods
+
+    async def _store_embeddings(self, embeddings: List[float], metadata: Dict[str, Any], content: str, file_path: str, code_type: str):
+        """Store embeddings and metadata in Supabase"""
+        try:
+            data = {
+                "embedding": embeddings,
+                "metadata": metadata,
+                "content": content,
+                "file_path": file_path,
+                "code_type": code_type,
+                "repository": "main"  # TODO: Make this configurable
+            }
+            
+            result = self.supabase.table("code_embeddings").insert(data).execute()
+            return result
+            
+        except Exception as e:
+            raise Exception(f"Failed to store embeddings: {str(e)}")
 
     async def get_enhanced_related_code(self, changes: List[CodeChange]) -> Dict[str, Any]:
         """Get enhanced related code analysis with dependency graph"""
