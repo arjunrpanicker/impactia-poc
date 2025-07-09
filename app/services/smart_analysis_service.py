@@ -4,6 +4,7 @@ Smart analysis service that decides between AST and LLM analysis
 import os
 import re
 import ast
+import json
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -397,59 +398,104 @@ class SmartAnalysisService:
         return re.sub(r'\s+', ' ', content).strip()
 
     async def _llm_analysis(self, file_path: str, old_content: str, new_content: str) -> AnalysisResult:
-        """Perform LLM-based analysis"""
+        """Perform LLM-based analysis with structured JSON output"""
         try:
             print(f"[DEBUG] Starting LLM analysis for {file_path}")
             
-            # Prepare prompt for LLM
+            # Prepare prompt for LLM with structured output
             prompt = f"""
 Analyze the changes in this file: {file_path}
 
 OLD VERSION:
 ```
-{old_content[:1500] if old_content else "No previous content (new file)"}
+{old_content[:2000] if old_content else "No previous content (new file)"}
 ```
 
 NEW VERSION:
 ```
-{new_content[:1500] if new_content else "No content (file deleted)"}
+{new_content[:2000] if new_content else "No content (file deleted)"}
 ```
 
-Please provide:
-1. A summary of what changed
-2. List of functions/methods that were added, modified, or deleted
-3. Risk level (low/medium/high)
-4. Performance impact (low/medium/high)
-5. Recommendations
+Please analyze the changes and respond with ONLY a valid JSON object in this exact format:
+{{
+    "summary": "Brief description of what changed",
+    "function_changes": [
+        {{
+            "name": "function_name",
+            "change_type": "added|modified|deleted",
+            "description": "What changed in this function"
+        }}
+    ],
+    "risk_level": "low|medium|high",
+    "performance_impact": "low|medium|high",
+    "recommendations": [
+        "Recommendation 1",
+        "Recommendation 2"
+    ]
+}}
 
-Keep the response concise and structured.
+IMPORTANT: 
+- Only include functions that actually exist in the code
+- Use exact function names as they appear in the code
+- Respond with ONLY the JSON object, no other text
+- If no functions are found, use an empty array for function_changes
 """
             
-            # Get LLM analysis - REMOVED await since OpenAI client is synchronous
+            # Get LLM analysis
             response = self.openai_service.client.chat.completions.create(
                 model=self.openai_service.deployment_name,
                 messages=[
-                    {"role": "system", "content": "You are a code analysis expert. Provide concise, actionable insights about code changes."},
+                    {"role": "system", "content": "You are a code analysis expert. Analyze code changes and respond with structured JSON only."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.1,
-                max_tokens=800
+                max_tokens=1000,
+                response_format={"type": "json_object"}
             )
             
             llm_result = response.choices[0].message.content.strip()
-            print(f"[DEBUG] LLM result: {llm_result[:200]}...")
+            print(f"[DEBUG] LLM raw result: {llm_result}")
             
-            # Parse LLM result to extract structured information
-            function_changes = self._parse_llm_result(llm_result, old_content, new_content, file_path)
+            # Parse JSON response
+            try:
+                analysis_data = json.loads(llm_result)
+                print(f"[DEBUG] Parsed LLM analysis: {analysis_data}")
+            except json.JSONDecodeError as e:
+                print(f"[DEBUG] Failed to parse LLM JSON: {e}")
+                # Fallback to basic analysis
+                analysis_data = {
+                    "summary": "LLM analysis completed but JSON parsing failed",
+                    "function_changes": [],
+                    "risk_level": "medium",
+                    "performance_impact": "low",
+                    "recommendations": ["Manual review recommended"]
+                }
+            
+            # Convert to FunctionChange objects
+            function_changes = []
+            for func_data in analysis_data.get("function_changes", []):
+                try:
+                    change_type = ChangeType(func_data.get("change_type", "modified"))
+                    function_changes.append(FunctionChange(
+                        name=func_data.get("name", "unknown"),
+                        change_type=change_type,
+                        old_content=func_data.get("description", "")[:200] if change_type in [ChangeType.MODIFIED, ChangeType.DELETED] else None,
+                        new_content=func_data.get("description", "")[:200] if change_type in [ChangeType.MODIFIED, ChangeType.ADDED] else None
+                    ))
+                except (ValueError, KeyError) as e:
+                    print(f"[DEBUG] Error processing function change: {e}")
+                    continue
+            
+            print(f"[DEBUG] LLM found {len(function_changes)} function changes")
             
             return AnalysisResult(
                 method_used=AnalysisMethod.LLM_ONLY,
                 function_changes=function_changes,
-                summary=llm_result,
+                summary=analysis_data.get("summary", "Analysis completed"),
                 confidence_score=0.8,  # LLM generally provides good insights
-                recommendations=self._extract_recommendations_from_llm(llm_result),
-                performance_impact=self._extract_performance_impact_from_llm(llm_result),
-                risk_level=self._extract_risk_level_from_llm(llm_result)
+                recommendations=analysis_data.get("recommendations", ["Review changes thoroughly"]),
+                performance_impact=analysis_data.get("performance_impact", "low"),
+                risk_level=analysis_data.get("risk_level", "medium")
             )
             
         except Exception as e:
@@ -481,12 +527,21 @@ Keep the response concise and structured.
         combined_summary = f"AST Analysis: {ast_result.summary}\n\nLLM Insights: {llm_result.summary}"
         combined_recommendations = list(set(ast_result.recommendations + llm_result.recommendations))
         
+        # Combine function changes (prefer AST for structure, LLM for insights)
+        combined_changes = ast_result.function_changes.copy()
+        
+        # Add LLM-detected changes that AST might have missed
+        ast_function_names = {change.name for change in ast_result.function_changes}
+        for llm_change in llm_result.function_changes:
+            if llm_change.name not in ast_function_names:
+                combined_changes.append(llm_change)
+        
         # Use higher confidence score
         confidence = max(ast_result.confidence_score, llm_result.confidence_score)
         
         return AnalysisResult(
             method_used=AnalysisMethod.HYBRID,
-            function_changes=ast_result.function_changes,  # Prefer AST for structured data
+            function_changes=combined_changes,
             summary=combined_summary,
             confidence_score=confidence,
             recommendations=combined_recommendations,
@@ -582,98 +637,6 @@ Keep the response concise and structured.
             return "medium"
         else:
             return "low"
-
-    def _parse_llm_result(self, llm_result: str, old_content: str, new_content: str, file_path: str) -> List[FunctionChange]:
-        """Parse LLM result to extract function changes"""
-        changes = []
-        
-        # Try to extract function names from the LLM result
-        function_patterns = [
-            r'function\s+`?(\w+)`?',
-            r'method\s+`?(\w+)`?',
-            r'`(\w+)`\s+function',
-            r'def\s+`?(\w+)`?',
-            r'`(\w+)\(\)`',
-        ]
-        
-        mentioned_functions = set()
-        for pattern in function_patterns:
-            matches = re.findall(pattern, llm_result, re.IGNORECASE)
-            mentioned_functions.update(matches)
-        
-        # If no functions mentioned in LLM result, extract from content
-        if not mentioned_functions:
-            old_functions = self._extract_functions_from_content(old_content, file_path)
-            new_functions = self._extract_functions_from_content(new_content, file_path)
-            mentioned_functions = set(old_functions.keys()) | set(new_functions.keys())
-        
-        # Create function changes based on mentioned functions
-        for func_name in mentioned_functions:
-            # Determine change type based on LLM result content
-            if "added" in llm_result.lower() or "new" in llm_result.lower():
-                change_type = ChangeType.ADDED
-            elif "deleted" in llm_result.lower() or "removed" in llm_result.lower():
-                change_type = ChangeType.DELETED
-            else:
-                change_type = ChangeType.MODIFIED
-            
-            changes.append(FunctionChange(
-                name=func_name,
-                change_type=change_type,
-                new_content="Content analyzed by LLM"
-            ))
-        
-        return changes
-
-    def _extract_recommendations_from_llm(self, llm_result: str) -> List[str]:
-        """Extract recommendations from LLM result"""
-        recommendations = []
-        
-        result_lower = llm_result.lower()
-        
-        if "test" in result_lower:
-            recommendations.append("Update test cases to reflect changes")
-        
-        if "breaking" in result_lower:
-            recommendations.append("Review for potential breaking changes")
-        
-        if "performance" in result_lower:
-            recommendations.append("Consider performance implications")
-        
-        if "security" in result_lower:
-            recommendations.append("Review security implications")
-        
-        if "documentation" in result_lower or "comment" in result_lower:
-            recommendations.append("Update documentation and comments")
-        
-        if not recommendations:
-            recommendations.append("Review changes thoroughly before deployment")
-        
-        return recommendations
-
-    def _extract_performance_impact_from_llm(self, llm_result: str) -> str:
-        """Extract performance impact from LLM result"""
-        result_lower = llm_result.lower()
-        
-        if "high" in result_lower and "performance" in result_lower:
-            return "high"
-        elif "performance" in result_lower or "optimization" in result_lower:
-            return "medium"
-        else:
-            return "low"
-
-    def _extract_risk_level_from_llm(self, llm_result: str) -> str:
-        """Extract risk level from LLM result"""
-        result_lower = llm_result.lower()
-        
-        if "high risk" in result_lower or "critical" in result_lower:
-            return "high"
-        elif "medium risk" in result_lower or "moderate" in result_lower:
-            return "medium"
-        elif "low risk" in result_lower:
-            return "low"
-        else:
-            return "medium"  # Default
 
     def _combine_risk_levels(self, ast_risk: str, llm_risk: str) -> str:
         """Combine risk levels from AST and LLM analysis"""
