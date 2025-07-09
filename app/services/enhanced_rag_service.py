@@ -293,6 +293,8 @@ class EnhancedRAGService:
     async def get_enhanced_related_code(self, changes: List[CodeChange]) -> Dict[str, Any]:
         """Get enhanced related code analysis with dependency graph"""
         try:
+            print(f"[DEBUG] Enhanced RAG: Processing {len(changes)} changes")
+            
             # Generate cache key
             cache_key = self._generate_cache_key(changes)
             
@@ -301,8 +303,34 @@ class EnhancedRAGService:
             if cached_result:
                 return cached_result
 
+            # Also run legacy analysis for comparison and fallback
+            try:
+                from .rag_service import RAGService
+                legacy_rag = RAGService()
+                legacy_result = await legacy_rag.get_related_code(changes)
+                print(f"[DEBUG] Legacy RAG found: {len(legacy_result.get('similar_code', {}).get('files', []))} similar files")
+            except Exception as e:
+                print(f"[DEBUG] Legacy RAG failed: {e}")
+                legacy_result = {}
+
             # Build comprehensive analysis
             result = await self._build_comprehensive_analysis(changes)
+            
+            # Merge with legacy results for better coverage
+            if legacy_result:
+                result["legacy_analysis"] = legacy_result
+                
+                # Enhance with legacy findings
+                legacy_similar = legacy_result.get("similar_code", {})
+                if legacy_similar.get("files"):
+                    result.setdefault("similar_files_legacy", legacy_similar["files"])
+                if legacy_similar.get("methods"):
+                    result.setdefault("similar_methods_legacy", legacy_similar["methods"])
+                
+                # Add legacy dependency chains
+                legacy_deps = legacy_result.get("dependency_chains", [])
+                if legacy_deps:
+                    result.setdefault("dependency_chains_legacy", legacy_deps)
             
             # Cache the result
             await self._cache_result(cache_key, result)
@@ -323,12 +351,26 @@ class EnhancedRAGService:
         # Step 2: Get related files from vector search
         related_files = await self._get_related_files_from_vector_search(changes)
         
+        print(f"[DEBUG] Found {len(related_files)} related files from vector search")
+        
         # Step 3: Build dependency graph
         all_files = {**changed_files, **related_files}
-        dependency_graph = self.dependency_analyzer.build_dependency_graph(all_files)
+        
+        try:
+            dependency_graph = self.dependency_analyzer.build_dependency_graph(all_files)
+            print(f"[DEBUG] Built dependency graph with {dependency_graph.number_of_nodes()} nodes")
+        except Exception as e:
+            print(f"[DEBUG] Dependency graph building failed: {e}")
+            dependency_graph = None
         
         # Step 4: Analyze impact
-        impact_analysis = self.dependency_analyzer.analyze_change_impact(list(changed_files.keys()))
+        impact_analysis = {}
+        if dependency_graph:
+            try:
+                impact_analysis = self.dependency_analyzer.analyze_change_impact(list(changed_files.keys()))
+                print(f"[DEBUG] Impact analysis found {len(impact_analysis.get('impacted_nodes', []))} impacted nodes")
+            except Exception as e:
+                print(f"[DEBUG] Impact analysis failed: {e}")
         
         # Step 5: Get semantic similarities
         semantic_analysis = await self._get_semantic_similarities(changes)
@@ -343,9 +385,9 @@ class EnhancedRAGService:
             "related_files": related_files,
             "test_files": test_files,
             "graph_metrics": {
-                "total_nodes": dependency_graph.number_of_nodes(),
-                "total_edges": dependency_graph.number_of_edges(),
-                "density": nx.density(dependency_graph) if dependency_graph.number_of_nodes() > 0 else 0
+                "total_nodes": dependency_graph.number_of_nodes() if dependency_graph else 0,
+                "total_edges": dependency_graph.number_of_edges() if dependency_graph else 0,
+                "density": nx.density(dependency_graph) if dependency_graph and dependency_graph.number_of_nodes() > 0 else 0
             }
         }
 

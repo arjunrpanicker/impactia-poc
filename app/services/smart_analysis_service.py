@@ -476,11 +476,23 @@ IMPORTANT:
             for func_data in analysis_data.get("function_changes", []):
                 try:
                     change_type = ChangeType(func_data.get("change_type", "modified"))
+                    
+                    # Extract more detailed content if available
+                    description = func_data.get("description", "")
+                    old_content = None
+                    new_content = None
+                    
+                    if change_type in [ChangeType.MODIFIED, ChangeType.DELETED]:
+                        old_content = description[:500] if description else "Previous version"
+                    
+                    if change_type in [ChangeType.MODIFIED, ChangeType.ADDED]:
+                        new_content = description[:500] if description else "New version"
+                    
                     function_changes.append(FunctionChange(
                         name=func_data.get("name", "unknown"),
                         change_type=change_type,
-                        old_content=func_data.get("description", "")[:200] if change_type in [ChangeType.MODIFIED, ChangeType.DELETED] else None,
-                        new_content=func_data.get("description", "")[:200] if change_type in [ChangeType.MODIFIED, ChangeType.ADDED] else None
+                        old_content=old_content,
+                        new_content=new_content
                     ))
                 except (ValueError, KeyError) as e:
                     print(f"[DEBUG] Error processing function change: {e}")
