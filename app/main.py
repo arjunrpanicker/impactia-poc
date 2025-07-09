@@ -93,6 +93,7 @@ async def analyze_changes_smart(
             method = AnalysisMethod.AUTO
 
         results = []
+        all_changes = []  # Collect all changes for RAG analysis
         
         for file in files:
             print(f"[DEBUG] Processing file: {file.filename}")
@@ -181,10 +182,21 @@ async def analyze_changes_smart(
                     
                     print(f"[DEBUG] Analyzing {file_path}: old={len(old_content)} chars, new={len(new_content)} chars")
                     
+                    # Add to changes collection for RAG analysis
+                    from ..models.analysis import CodeChange
+                    all_changes.append(CodeChange(
+                        file_path=file_path,
+                        content=new_content,
+                        diff=text_content,
+                        change_type="modified"
+                    ))
+                    
                     # Perform smart analysis
                     analysis_result = await smart_analysis_service.analyze_code_changes(
                         file_path, old_content, new_content, method
                     )
+                    
+                    print(f"[DEBUG] Analysis result for {file_path}: {len(analysis_result.function_changes)} function changes")
                     
                     results.append({
                         "file_path": file_path,
@@ -208,10 +220,21 @@ async def analyze_changes_smart(
                     })
             else:
                 print(f"[DEBUG] File {file.filename} is regular content")
+                
+                # Add to changes collection for RAG analysis
+                from ..models.analysis import CodeChange
+                all_changes.append(CodeChange(
+                    file_path=file.filename,
+                    content=text_content,
+                    change_type="added"
+                ))
+                
                 # Regular file content - treat as new file
                 analysis_result = await smart_analysis_service.analyze_code_changes(
                     file.filename, "", text_content, method
                 )
+                
+                print(f"[DEBUG] Analysis result for {file.filename}: {len(analysis_result.function_changes)} function changes")
                 
                 results.append({
                     "file_path": file.filename,
@@ -235,6 +258,42 @@ async def analyze_changes_smart(
                 })
 
         print(f"[DEBUG] Analysis completed with {len(results)} results")
+        
+        # Get related code analysis using RAG
+        related_code_analysis = {}
+        impacted_elements_count = 0
+        dependency_chains_count = 0
+        
+        if all_changes:
+            try:
+                print(f"[DEBUG] Running RAG analysis for {len(all_changes)} changes")
+                related_code_analysis = await enhanced_rag_service.get_enhanced_related_code(all_changes)
+                
+                # Count impacted elements
+                dependency_analysis = related_code_analysis.get("dependency_analysis", {})
+                impacted_nodes = dependency_analysis.get("impacted_nodes", [])
+                impact_chains = dependency_analysis.get("impact_chains", [])
+                
+                impacted_elements_count = len(impacted_nodes)
+                dependency_chains_count = len(impact_chains)
+                
+                print(f"[DEBUG] RAG analysis found {impacted_elements_count} impacted elements and {dependency_chains_count} dependency chains")
+                
+                # Enhance recommendations with RAG insights
+                if impacted_elements_count > 0:
+                    for result in results:
+                        result["recommendations"].extend([
+                            f"Review {impacted_elements_count} potentially impacted code elements",
+                            "Check dependency chains for breaking changes"
+                        ])
+                
+                if dependency_chains_count > 0:
+                    for result in results:
+                        result["recommendations"].append(f"Analyze {dependency_chains_count} dependency relationships")
+                
+            except Exception as e:
+                print(f"[DEBUG] RAG analysis failed: {str(e)}")
+                related_code_analysis = {"error": str(e)}
 
         # Performance analysis if requested
         performance_results = []
@@ -255,24 +314,34 @@ async def analyze_changes_smart(
             if perf_changes:
                 performance_results = performance_analyzer.analyze_performance_impact(perf_changes)
 
+        # Calculate correct metrics
+        files_with_changes = len([r for r in results if r["function_changes"]])
+        total_function_changes = sum(len(r["function_changes"]) for r in results)
+        
+        print(f"[DEBUG] Final metrics: files_with_changes={files_with_changes}, total_function_changes={total_function_changes}")
+        
         response = {
             "analysis_results": results,
             "performance_analysis": performance_results if include_performance else None,
+            "related_code_analysis": related_code_analysis,
             "overall_risk": _calculate_overall_risk(results),
             "recommendations": _generate_overall_recommendations(results),
             "total_files_analyzed": len(results),
             "analysis_summary": {
-                "files_with_changes": len([r for r in results if r["function_changes"]]),
-                "total_function_changes": sum(len(r["function_changes"]) for r in results),
+                "files_with_changes": files_with_changes,
+                "total_function_changes": total_function_changes,
+                "total_impacted_elements": impacted_elements_count,
+                "total_dependency_chains": dependency_chains_count,
                 "methods_used": list(set(r["analysis_method"] for r in results))
             }
         }
         
         print(f"[DEBUG] Returning response with {len(results)} analysis results")
-        if results:
-            print(f"[DEBUG] Sample result: {results[0]['summary'][:100]}...")
-        else:
-            print(f"[DEBUG] Returning response with 0 analysis results but there are changes.")
+        for i, result in enumerate(results):
+            print(f"[DEBUG] Result {i+1}: {result['file_path']} - {len(result['function_changes'])} function changes")
+            if result['function_changes']:
+                for j, func_change in enumerate(result['function_changes']):
+                    print(f"[DEBUG]   Function {j+1}: {func_change['name']} ({func_change['change_type']})")
         
         return response
 

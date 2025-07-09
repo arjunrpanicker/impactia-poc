@@ -487,6 +487,8 @@ IMPORTANT:
                     continue
             
             print(f"[DEBUG] LLM found {len(function_changes)} function changes")
+            for i, change in enumerate(function_changes):
+                print(f"[DEBUG]   Function {i+1}: {change.name} ({change.change_type.value})")
             
             return AnalysisResult(
                 method_used=AnalysisMethod.LLM_ONLY,
