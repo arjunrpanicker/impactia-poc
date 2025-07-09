@@ -183,7 +183,7 @@ async def analyze_changes_smart(
                     print(f"[DEBUG] Analyzing {file_path}: old={len(old_content)} chars, new={len(new_content)} chars")
                     
                     # Add to changes collection for RAG analysis
-                    from ..models.analysis import CodeChange
+                    from .models.analysis import CodeChange
                     all_changes.append(CodeChange(
                         file_path=file_path,
                         content=new_content,
@@ -222,7 +222,7 @@ async def analyze_changes_smart(
                 print(f"[DEBUG] File {file.filename} is regular content")
                 
                 # Add to changes collection for RAG analysis
-                from ..models.analysis import CodeChange
+                from .models.analysis import CodeChange
                 all_changes.append(CodeChange(
                     file_path=file.filename,
                     content=text_content,
