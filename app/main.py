@@ -267,8 +267,8 @@ async def analyze_changes_smart(
         if all_changes:
             try:
                 print(f"[DEBUG] Running RAG analysis for {len(all_changes)} changes")
-                # Use the legacy RAG service logic for better results
-                related_code_analysis = await rag_service.get_related_code(all_changes)
+                # Use the enhanced RAG service with legacy compatibility
+                related_code_analysis = await enhanced_rag_service.get_related_code(all_changes)
                 
                 # Count impacted elements from legacy format
                 dependency_chains = related_code_analysis.get("dependency_chains", [])

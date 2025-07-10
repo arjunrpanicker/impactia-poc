@@ -340,6 +340,121 @@ class EnhancedRAGService:
         except Exception as e:
             raise Exception(f"Failed to get enhanced related code: {str(e)}")
 
+    async def get_related_code(self, changes: List[CodeChange]) -> Dict[str, Any]:
+        """Legacy compatibility method - delegates to enhanced analysis"""
+        try:
+            print(f"[DEBUG] Legacy get_related_code called with {len(changes)} changes")
+            
+            # Use the enhanced method but format for legacy compatibility
+            enhanced_result = await self.get_enhanced_related_code(changes)
+            
+            # Convert enhanced format to legacy format
+            legacy_result = {
+                "changed_files": enhanced_result.get("changed_files", []),
+                "direct_dependencies": {
+                    "incoming": [],
+                    "outgoing": []
+                },
+                "dependency_chains": [],
+                "dependency_visualization": [],
+                "similar_code": {
+                    "files": [],
+                    "methods": []
+                }
+            }
+            
+            # Extract similar files from enhanced result
+            related_files = enhanced_result.get("related_files", {})
+            for file_path, content in related_files.items():
+                legacy_result["similar_code"]["files"].append({
+                    "path": file_path,
+                    "content": content,
+                    "similarity": 0.8,  # Default similarity
+                    "methods": []
+                })
+            
+            # Extract semantic similarities
+            semantic_similarities = enhanced_result.get("semantic_similarities", {})
+            for func_list in semantic_similarities.get("by_function_signature", []):
+                legacy_result["similar_code"]["methods"].append({
+                    "name": func_list.get("function_name", "unknown"),
+                    "file_path": func_list.get("file_path", ""),
+                    "content": func_list.get("content", ""),
+                    "similarity": 0.8
+                })
+            
+            # Create dependency chains from dependency analysis
+            dependency_analysis = enhanced_result.get("dependency_analysis", {})
+            impact_chains = dependency_analysis.get("impact_chains", [])
+            
+            for chain in impact_chains:
+                legacy_chain = {
+                    "file_path": chain.get("source_file", ""),
+                    "methods": [],
+                    "dependent_files": []
+                }
+                
+                # Add impacted files
+                impacted_files = chain.get("impacted_files", {})
+                for file_path, elements in impacted_files.items():
+                    dependent_file = {
+                        "file_path": file_path,
+                        "methods": []
+                    }
+                    
+                    for element in elements:
+                        dependent_file["methods"].append({
+                            "name": element.get("name", "unknown"),
+                            "summary": f"Impacted by changes (depth: {element.get('depth', 0)})"
+                        })
+                    
+                    legacy_chain["dependent_files"].append(dependent_file)
+                
+                legacy_result["dependency_chains"].append(legacy_chain)
+            
+            # Add dependency visualization
+            visualization = enhanced_result.get("dependency_analysis", {}).get("visualization", [])
+            legacy_result["dependency_visualization"] = visualization
+            
+            # Add direct dependencies
+            if impact_chains:
+                # Extract incoming and outgoing references
+                incoming_refs = set()
+                outgoing_refs = set()
+                
+                for chain in impact_chains:
+                    source_file = chain.get("source_file", "")
+                    impacted_files = chain.get("impacted_files", {})
+                    
+                    for file_path in impacted_files.keys():
+                        if file_path != source_file:
+                            incoming_refs.add(file_path)
+                
+                legacy_result["direct_dependencies"]["incoming"] = list(incoming_refs)
+                legacy_result["direct_dependencies"]["outgoing"] = list(outgoing_refs)
+            
+            print(f"[DEBUG] Legacy format conversion completed")
+            print(f"[DEBUG] Similar files: {len(legacy_result['similar_code']['files'])}")
+            print(f"[DEBUG] Similar methods: {len(legacy_result['similar_code']['methods'])}")
+            print(f"[DEBUG] Dependency chains: {len(legacy_result['dependency_chains'])}")
+            
+            return legacy_result
+            
+        except Exception as e:
+            print(f"[DEBUG] Legacy get_related_code failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Return minimal legacy format on error
+            return {
+                "changed_files": [change.file_path for change in changes],
+                "direct_dependencies": {"incoming": [], "outgoing": []},
+                "dependency_chains": [],
+                "dependency_visualization": [],
+                "similar_code": {"files": [], "methods": []},
+                "error": str(e)
+            }
+
     async def _build_comprehensive_analysis(self, changes: List[CodeChange]) -> Dict[str, Any]:
         """Build comprehensive code analysis"""
         # Step 1: Parse changed files
@@ -571,79 +686,4 @@ class EnhancedRAGService:
                     if test_file and test_file not in related_tests:
                         related_tests.append(test_file)
                         
-            # Also search for files that reference the changed file
-            result = self.supabase.table("code_embeddings").select("file_path").ilike(
-                "content", f"%{os.path.basename(file_path)}%"
-            ).ilike("file_path", "%test%").execute()
-            
-            for item in result.data:
-                test_file = item.get("file_path", "")
-                if test_file and test_file not in related_tests:
-                    related_tests.append(test_file)
-                    
-            test_files[file_path] = related_tests
-            
-        return test_files
-
-    def _generate_test_patterns(self, file_path: str) -> List[str]:
-        """Generate potential test file patterns"""
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        dir_name = os.path.dirname(file_path)
-        
-        patterns = [
-            f"%test_{base_name}%",
-            f"%{base_name}_test%",
-            f"%{base_name}.test%",
-            f"%{base_name}.spec%",
-            f"%Test{base_name}%",
-            f"%{base_name}Test%",
-            f"%tests/{base_name}%",
-            f"%test/{base_name}%",
-            f"%__tests__/{base_name}%"
-        ]
-        
-        return patterns
-
-    def _generate_cache_key(self, changes: List[CodeChange]) -> str:
-        """Generate cache key for changes"""
-        content_hash = hashlib.md5()
-        
-        for change in changes:
-            content_hash.update(f"{change.file_path}:{change.change_type}".encode())
-            if change.content:
-                content_hash.update(change.content.encode())
-            if change.diff:
-                content_hash.update(change.diff.encode())
-                
-        return f"rag_analysis_{content_hash.hexdigest()}"
-
-    async def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Get cached analysis result"""
-        try:
-            result = self.supabase.table("analysis_cache").select("*").eq(
-                "cache_key", cache_key
-            ).gte(
-                "created_at", (datetime.utcnow() - self.cache_ttl).isoformat()
-            ).execute()
-            
-            if result.data:
-                return json.loads(result.data[0]["result"])
-                
-        except Exception as e:
-            print(f"Cache retrieval error: {str(e)}")
-            
-        return None
-
-    async def _cache_result(self, cache_key: str, result: Dict[str, Any]):
-        """Cache analysis result"""
-        try:
-            data = {
-                "cache_key": cache_key,
-                "result": json.dumps(result),
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            self.supabase.table("analysis_cache").upsert(data).execute()
-            
-        except Exception as e:
-            print(f"Cache storage error: {str(e)}")
+            #
