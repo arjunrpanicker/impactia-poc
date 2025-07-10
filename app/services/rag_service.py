@@ -360,7 +360,7 @@ class RAGService:
                 raise ValueError("No valid content or diff found in changes")
 
             # Step 2: Generate embedding for the changes
-            change_embedding = await self.openai_service.get_embeddings(combined_text)
+            change_embedding = self.openai_service.get_embeddings(combined_text)
             
             # Step 3: Search for semantically similar code with a lower threshold
             similar_code = await self._search_similar(change_embedding, limit=10, threshold=0.6)
