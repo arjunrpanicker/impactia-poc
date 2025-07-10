@@ -259,97 +259,6 @@ async def analyze_changes_smart(
 
         print(f"[DEBUG] Analysis completed with {len(results)} results")
         
-        # Get related code analysis using RAG
-        related_code_analysis = {}
-        impacted_elements_count = 0
-        dependency_chains_count = 0
-        
-        if all_changes:
-            try:
-                print(f"[DEBUG] Running RAG analysis for {len(all_changes)} changes")
-                # Use the enhanced RAG service with legacy compatibility
-                related_code_analysis = await enhanced_rag_service.get_related_code(all_changes)
-                
-                # Count impacted elements from legacy format
-                dependency_chains = related_code_analysis.get("dependency_chains", [])
-                similar_files = related_code_analysis.get("similar_code", {}).get("files", [])
-                similar_methods = related_code_analysis.get("similar_code", {}).get("methods", [])
-                direct_deps = related_code_analysis.get("direct_dependencies", {})
-                
-                impacted_elements_count = len(similar_files) + len(similar_methods)
-                dependency_chains_count = len(dependency_chains)
-                incoming_refs_count = len(direct_deps.get("incoming", []))
-                outgoing_refs_count = len(direct_deps.get("outgoing", []))
-                
-                print(f"[DEBUG] RAG analysis found:")
-                print(f"[DEBUG]   - {len(similar_files)} similar files")
-                print(f"[DEBUG]   - {len(similar_methods)} similar methods") 
-                print(f"[DEBUG]   - {dependency_chains_count} dependency chains")
-                print(f"[DEBUG]   - {incoming_refs_count} incoming references")
-                print(f"[DEBUG]   - {outgoing_refs_count} outgoing references")
-                
-                # Enhance results with RAG insights
-                for result in results:
-                    # Add dependency information to each result
-                    result["related_code"] = {
-                        "similar_files": similar_files,
-                        "similar_methods": similar_methods,
-                        "dependency_chains": dependency_chains,
-                        "incoming_references": direct_deps.get("incoming", []),
-                        "outgoing_references": direct_deps.get("outgoing", [])
-                    }
-                    
-                    # Enhance recommendations with specific insights
-                    if similar_files:
-                        result["recommendations"].append(f"Review {len(similar_files)} similar files that may be affected")
-                    
-                    if similar_methods:
-                        result["recommendations"].append(f"Check {len(similar_methods)} similar methods for consistency")
-                    
-                    if dependency_chains:
-                        result["recommendations"].append(f"Analyze {len(dependency_chains)} dependency relationships")
-                    
-                    if incoming_refs_count > 0:
-                        result["recommendations"].append(f"Review {incoming_refs_count} files that depend on these changes")
-                    
-                    if outgoing_refs_count > 0:
-                        result["recommendations"].append(f"Verify {outgoing_refs_count} external dependencies still work")
-                
-                # Update function changes with dependency context
-                for result in results:
-                    for result in results:
-                        # Find matching dependency chains for this file
-                        file_chains = [chain for chain in dependency_chains 
-                                     if chain.get("file_path") == result["file_path"]]
-                        
-                        if file_chains:
-                            # Add dependency context to function changes
-                            for func_change in result["function_changes"]:
-                                func_change["dependency_impact"] = {
-                                    "dependent_files": [],
-                                    "impact_summary": "No specific dependencies found"
-                                }
-                                
-                                # Look for this function in dependency chains
-                                for chain in file_chains:
-                                    for dep_file in chain.get("dependent_files", []):
-                                        for method in dep_file.get("methods", []):
-                                            if method.get("name") == func_change["name"]:
-                                                func_change["dependency_impact"]["dependent_files"].append({
-                                                    "file": dep_file.get("file_path"),
-                                                    "impact": method.get("summary", "")
-                                                })
-                                
-                                if func_change["dependency_impact"]["dependent_files"]:
-                                    dep_count = len(func_change["dependency_impact"]["dependent_files"])
-                                    func_change["dependency_impact"]["impact_summary"] = f"Affects {dep_count} dependent file(s)"
-                
-            except Exception as e:
-                print(f"[DEBUG] RAG analysis failed: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                related_code_analysis = {"error": str(e)}
-
         # Performance analysis if requested
         performance_results = []
         if include_performance:
@@ -387,15 +296,12 @@ async def analyze_changes_smart(
         response = {
             "analysis_results": results,
             "performance_analysis": performance_results if include_performance else None,
-            "related_code_analysis": related_code_analysis,
             "overall_risk": _calculate_overall_risk(results),
             "recommendations": _generate_overall_recommendations(results),
             "total_files_analyzed": len(results),
             "analysis_summary": {
                 "files_with_changes": files_with_changes,
                 "total_function_changes": total_function_changes,
-                "total_impacted_elements": impacted_elements_count,
-                "total_dependency_chains": dependency_chains_count,
                 "methods_used": list(set(r["analysis_method"] for r in results))
             }
         }
