@@ -400,43 +400,36 @@ async def analyze_impact(
         print(f"[DEBUG] Created {len(changes)} CodeChange objects")
         
         # Perform impact analysis
-        impact_analysis = await impact_analysis_service.analyze_impact(changes)
+        method_impact_analysis = await impact_analysis_service.analyze_impact(changes)
         
-        # Convert to response format - handle extracted files properly
-        changed_files_response = []
+        # Convert to method-focused response format
+        changed_methods_response = [
+            {
+                "file_path": cm.file_path,
+                "method": cm.method,
+                "summary": cm.summary
+            }
+            for cm in method_impact_analysis.changed_methods
+        ]
         
-        # Group by actual file paths (in case multiple changes refer to same file)
-        file_summaries = {}
-        for cf in impact_analysis.changed_files:
-            if cf.file_path in file_summaries:
-                # Combine summaries for the same file
-                file_summaries[cf.file_path] += f"; {cf.functional_summary}"
-            else:
-                file_summaries[cf.file_path] = cf.functional_summary
-        
-        # Create response objects
-        for file_path, summary in file_summaries.items():
-            changed_files_response.append({
-                "file_path": file_path,
-                "functional_summary": summary
-            })
+        impacted_methods_response = [
+            {
+                "file_path": im.file_path,
+                "method": im.method,
+                "impact_reason": im.impact_reason,
+                "impact_description": im.impact_description
+            }
+            for im in method_impact_analysis.impacted_methods
+        ]
         
         response = {
-            "summary": impact_analysis.summary,
-            "changed_files": changed_files_response,
-            "impacted_files": [
-                {
-                    "file_path": imp.file_path,
-                    "impact_reason": imp.impact_reason,
-                    "impact_description": imp.impact_description
-                }
-                for imp in impact_analysis.impacted_files
-            ]
+            "changed_methods": changed_methods_response,
+            "impacted_methods": impacted_methods_response
         }
         
         print(f"[DEBUG] Impact analysis completed")
-        print(f"[DEBUG] Changed files: {len(impact_analysis.changed_files)}")
-        print(f"[DEBUG] Impacted files: {len(impact_analysis.impacted_files)}")
+        print(f"[DEBUG] Changed methods: {len(method_impact_analysis.changed_methods)}")
+        print(f"[DEBUG] Impacted methods: {len(method_impact_analysis.impacted_methods)}")
         
         return response
         
