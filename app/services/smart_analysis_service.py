@@ -574,67 +574,6 @@ IMPORTANT:
                 except (ValueError, KeyError) as e:
                     print(f"[DEBUG] Error processing function change: {e}")
                     continue
-                model=self.openai_service.deployment_name,
-                messages=[
-                    {"role": "system", "content": "You are a code analysis expert. Analyze code changes and respond with structured JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=1000,
-                response_format={"type": "json_object"}
-            )
-            
-            llm_result = response.choices[0].message.content.strip()
-            print(f"[DEBUG] LLM raw result: {llm_result}")
-            
-            # Parse JSON response
-            try:
-                analysis_data = json.loads(llm_result)
-                print(f"[DEBUG] Parsed LLM analysis: {analysis_data}")
-            except json.JSONDecodeError as e:
-                print(f"[DEBUG] Failed to parse LLM JSON: {e}")
-                # Fallback to regex analysis
-                analysis_data = {
-                    "summary": f"LLM JSON parsing failed, using regex analysis. Found {len(regex_changes)} function changes.",
-                    "function_changes": [
-                        {
-                            "name": change.name,
-                            "change_type": change.change_type.value,
-                            "description": f"Function {change.change_type.value}"
-                        }
-                        for change in regex_changes
-                    ],
-                    "risk_level": "medium",
-                    "performance_impact": "low",
-                    "recommendations": ["Manual review recommended due to LLM parsing failure"]
-                }
-            
-            # Convert to FunctionChange objects
-            function_changes = []
-            for func_data in analysis_data.get("function_changes", []):
-                try:
-                    change_type = ChangeType(func_data.get("change_type", "modified"))
-                    
-                    # Extract more detailed content if available
-                    description = func_data.get("description", "")
-                    old_content = None
-                    new_content = None
-                    
-                    if change_type in [ChangeType.MODIFIED, ChangeType.DELETED]:
-                        old_content = description[:500] if description else "Previous version"
-                    
-                    if change_type in [ChangeType.MODIFIED, ChangeType.ADDED]:
-                        new_content = description[:500] if description else "New version"
-                    
-                    function_changes.append(FunctionChange(
-                        name=func_data.get("name", "unknown"),
-                        change_type=change_type,
-                        old_content=old_content,
-                        new_content=new_content
-                    ))
-                except (ValueError, KeyError) as e:
-                    print(f"[DEBUG] Error processing function change: {e}")
-                    continue
             
             # If LLM didn't find functions but regex did, use regex results
             if not function_changes and regex_changes:
