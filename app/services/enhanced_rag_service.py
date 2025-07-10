@@ -30,6 +30,127 @@ class EnhancedRAGService:
         self.batch_size = 20
         self.skip_tests = True
 
+    def _generate_cache_key(self, changes: List[CodeChange]) -> str:
+        """Generate a cache key for the given changes"""
+        try:
+            # Create a deterministic key based on file paths and content hashes
+            key_parts = []
+            for change in changes:
+                file_part = change.file_path
+                content_hash = hashlib.md5((change.content or "").encode()).hexdigest()[:8]
+                diff_hash = hashlib.md5((change.diff or "").encode()).hexdigest()[:8]
+                key_parts.append(f"{file_part}:{content_hash}:{diff_hash}")
+            
+            combined = "|".join(sorted(key_parts))
+            return hashlib.sha256(combined.encode()).hexdigest()[:32]
+        except Exception as e:
+            print(f"[DEBUG] Error generating cache key: {e}")
+            # Fallback to timestamp-based key
+            return f"fallback_{int(datetime.now().timestamp())}"
+
+    async def _get_cached_result(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Get cached result if available and not expired"""
+        try:
+            result = self.supabase.table("analysis_cache").select("*").eq("cache_key", cache_key).execute()
+            
+            if result.data:
+                cache_entry = result.data[0]
+                expires_at = datetime.fromisoformat(cache_entry["expires_at"].replace('Z', '+00:00'))
+                
+                if datetime.now(expires_at.tzinfo) < expires_at:
+                    print(f"[DEBUG] Cache hit for key: {cache_key}")
+                    return cache_entry["result"]
+                else:
+                    print(f"[DEBUG] Cache expired for key: {cache_key}")
+                    # Clean up expired entry
+                    self.supabase.table("analysis_cache").delete().eq("cache_key", cache_key).execute()
+            
+            print(f"[DEBUG] Cache miss for key: {cache_key}")
+            return None
+            
+        except Exception as e:
+            print(f"[DEBUG] Error getting cached result: {e}")
+            return None
+
+    async def _cache_result(self, cache_key: str, result: Dict[str, Any]) -> None:
+        """Cache the analysis result"""
+        try:
+            expires_at = datetime.now() + self.cache_ttl
+            
+            cache_data = {
+                "cache_key": cache_key,
+                "result": result,
+                "expires_at": expires_at.isoformat()
+            }
+            
+            # Use upsert to handle key conflicts
+            self.supabase.table("analysis_cache").upsert(cache_data).execute()
+            print(f"[DEBUG] Cached result for key: {cache_key}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error caching result: {e}")
+            # Don't fail the main operation if caching fails
+            pass
+
+    async def _find_related_test_files(self, changed_files: List[str]) -> Dict[str, List[str]]:
+        """Find test files related to changed files"""
+        test_files = {}
+        
+        for file_path in changed_files:
+            # Generate potential test file patterns
+            test_patterns = self._generate_test_patterns(file_path)
+            
+            related_tests = []
+            for pattern in test_patterns:
+                try:
+                    # Search for test files
+                    result = self.supabase.table("code_embeddings").select("file_path").ilike(
+                        "file_path", pattern
+                    ).execute()
+                    
+                    for item in result.data:
+                        test_file = item.get("file_path", "")
+                        if test_file and test_file not in related_tests:
+                            related_tests.append(test_file)
+                except Exception as e:
+                    print(f"[DEBUG] Error searching for test pattern {pattern}: {e}")
+                    continue
+                    
+            test_files[file_path] = related_tests
+            
+        return test_files
+
+    def _generate_test_patterns(self, file_path: str) -> List[str]:
+        """Generate potential test file patterns for a given file"""
+        patterns = []
+        
+        # Extract file info
+        file_name = os.path.basename(file_path)
+        file_name_no_ext = os.path.splitext(file_name)[0]
+        file_dir = os.path.dirname(file_path)
+        
+        # Common test patterns
+        test_patterns = [
+            f"%test%{file_name_no_ext}%",
+            f"%{file_name_no_ext}%test%",
+            f"%{file_name_no_ext}.test.%",
+            f"%{file_name_no_ext}.spec.%",
+            f"%test_{file_name_no_ext}%",
+            f"%{file_name_no_ext}_test%",
+            f"%tests%{file_name_no_ext}%",
+            f"%{file_name_no_ext}%tests%",
+        ]
+        
+        # Add directory-based patterns
+        if file_dir:
+            test_patterns.extend([
+                f"%test%{file_dir}%{file_name_no_ext}%",
+                f"%tests%{file_dir}%{file_name_no_ext}%",
+                f"%{file_dir}%test%{file_name_no_ext}%",
+                f"%{file_dir}%tests%{file_name_no_ext}%",
+            ])
+        
+        return test_patterns
     async def index_repository(self, file: UploadFile) -> IndexingResult:
         """Index repository code into Supabase vector store"""
         try:
