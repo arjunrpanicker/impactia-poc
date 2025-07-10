@@ -375,6 +375,15 @@ async def analyze_changes_smart(
         
         print(f"[DEBUG] Final metrics: files_with_changes={files_with_changes}, total_function_changes={total_function_changes}")
         
+        # Debug: Print detailed results
+        for i, result in enumerate(results):
+            print(f"[DEBUG] Result {i}: {result['file_path']}")
+            print(f"[DEBUG]   Function changes: {len(result['function_changes'])}")
+            print(f"[DEBUG]   Summary: {result['summary']}")
+            if result['function_changes']:
+                for j, func_change in enumerate(result['function_changes']):
+                    print(f"[DEBUG]     Function {j+1}: {func_change['name']} ({func_change['change_type']})")
+        
         response = {
             "analysis_results": results,
             "performance_analysis": performance_results if include_performance else None,

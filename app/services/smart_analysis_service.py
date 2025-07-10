@@ -402,6 +402,41 @@ class SmartAnalysisService:
         try:
             print(f"[DEBUG] Starting LLM analysis for {file_path}")
             
+            # First, try to extract functions using regex as fallback
+            old_functions = self._extract_functions_from_content(old_content, file_path) if old_content else {}
+            new_functions = self._extract_functions_from_content(new_content, file_path) if new_content else {}
+            
+            print(f"[DEBUG] Regex extracted - Old functions: {list(old_functions.keys())}")
+            print(f"[DEBUG] Regex extracted - New functions: {list(new_functions.keys())}")
+            
+            # Create function changes from regex analysis as baseline
+            regex_changes = []
+            all_function_names = set(old_functions.keys()) | set(new_functions.keys())
+            
+            for name in all_function_names:
+                if name in old_functions and name in new_functions:
+                    if self._normalize_content(old_functions[name]) != self._normalize_content(new_functions[name]):
+                        regex_changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.MODIFIED,
+                            old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name],
+                            new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                        ))
+                elif name in new_functions:
+                    regex_changes.append(FunctionChange(
+                        name=name,
+                        change_type=ChangeType.ADDED,
+                        new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                    ))
+                elif name in old_functions:
+                    regex_changes.append(FunctionChange(
+                        name=name,
+                        change_type=ChangeType.DELETED,
+                        old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name]
+                    ))
+            
+            print(f"[DEBUG] Regex analysis found {len(regex_changes)} function changes")
+            
             # Prepare prompt for LLM with structured output
             prompt = f"""
 Analyze the changes in this file: {file_path}
@@ -415,6 +450,10 @@ NEW VERSION:
 ```
 {new_content[:2000] if new_content else "No content (file deleted)"}
 ```
+
+Functions detected by analysis:
+Old functions: {list(old_functions.keys())}
+New functions: {list(new_functions.keys())}
 
 Please analyze the changes and respond with ONLY a valid JSON object in this exact format:
 {{
@@ -439,10 +478,11 @@ IMPORTANT:
 - Use exact function names as they appear in the code
 - Respond with ONLY the JSON object, no other text
 - If no functions are found, use an empty array for function_changes
+- Focus on the functions listed above that were detected in the code
 """
             
             # Get LLM analysis
-            response = self.openai_service.client.chat.completions.create(
+            response = await self.openai_service.client.chat.completions.create(
                 model=self.openai_service.deployment_name,
                 messages=[
                     {"role": "system", "content": "You are a code analysis expert. Analyze code changes and respond with structured JSON only."},
@@ -462,13 +502,20 @@ IMPORTANT:
                 print(f"[DEBUG] Parsed LLM analysis: {analysis_data}")
             except json.JSONDecodeError as e:
                 print(f"[DEBUG] Failed to parse LLM JSON: {e}")
-                # Fallback to basic analysis
+                # Fallback to regex analysis
                 analysis_data = {
-                    "summary": "LLM analysis completed but JSON parsing failed",
-                    "function_changes": [],
+                    "summary": f"LLM JSON parsing failed, using regex analysis. Found {len(regex_changes)} function changes.",
+                    "function_changes": [
+                        {
+                            "name": change.name,
+                            "change_type": change.change_type.value,
+                            "description": f"Function {change.change_type.value}"
+                        }
+                        for change in regex_changes
+                    ],
                     "risk_level": "medium",
                     "performance_impact": "low",
-                    "recommendations": ["Manual review recommended"]
+                    "recommendations": ["Manual review recommended due to LLM parsing failure"]
                 }
             
             # Convert to FunctionChange objects
@@ -498,6 +545,12 @@ IMPORTANT:
                     print(f"[DEBUG] Error processing function change: {e}")
                     continue
             
+            # If LLM didn't find functions but regex did, use regex results
+            if not function_changes and regex_changes:
+                print(f"[DEBUG] LLM found no functions, using regex results: {len(regex_changes)} changes")
+                function_changes = regex_changes
+                analysis_data["summary"] = f"Used regex analysis. Found {len(regex_changes)} function changes: {', '.join([c.name for c in regex_changes])}"
+            
             print(f"[DEBUG] LLM found {len(function_changes)} function changes")
             for i, change in enumerate(function_changes):
                 print(f"[DEBUG]   Function {i+1}: {change.name} ({change.change_type.value})")
@@ -516,7 +569,52 @@ IMPORTANT:
             print(f"[DEBUG] LLM analysis failed: {str(e)}")
             import traceback
             traceback.print_exc()
-            # Return minimal result if LLM fails
+            
+            # Fallback to regex analysis if LLM completely fails
+            try:
+                old_functions = self._extract_functions_from_content(old_content, file_path) if old_content else {}
+                new_functions = self._extract_functions_from_content(new_content, file_path) if new_content else {}
+                
+                fallback_changes = []
+                all_function_names = set(old_functions.keys()) | set(new_functions.keys())
+                
+                for name in all_function_names:
+                    if name in old_functions and name in new_functions:
+                        if self._normalize_content(old_functions[name]) != self._normalize_content(new_functions[name]):
+                            fallback_changes.append(FunctionChange(
+                                name=name,
+                                change_type=ChangeType.MODIFIED,
+                                old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name],
+                                new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                            ))
+                    elif name in new_functions:
+                        fallback_changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.ADDED,
+                            new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                        ))
+                    elif name in old_functions:
+                        fallback_changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.DELETED,
+                            old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name]
+                        ))
+                
+                if fallback_changes:
+                    print(f"[DEBUG] Using fallback regex analysis: {len(fallback_changes)} changes")
+                    return AnalysisResult(
+                        method_used=AnalysisMethod.LLM_ONLY,
+                        function_changes=fallback_changes,
+                        summary=f"LLM failed, used regex analysis. Found {len(fallback_changes)} function changes: {', '.join([c.name for c in fallback_changes])}",
+                        confidence_score=0.6,
+                        recommendations=["LLM analysis failed, regex analysis used", "Manual review recommended"],
+                        performance_impact="unknown",
+                        risk_level="medium"
+                    )
+            except Exception as fallback_error:
+                print(f"[DEBUG] Fallback analysis also failed: {str(fallback_error)}")
+            
+            # Final fallback - return minimal result
             return AnalysisResult(
                 method_used=AnalysisMethod.LLM_ONLY,
                 function_changes=[],
