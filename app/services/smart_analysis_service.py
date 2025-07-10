@@ -95,6 +95,19 @@ class SmartAnalysisService:
         
         print(f"[DEBUG] Using analysis method: {method}")
         
+        # Debug: Check if we have actual content to analyze
+        if not old_content.strip() and not new_content.strip():
+            print(f"[DEBUG] Both old and new content are empty or whitespace only")
+            return AnalysisResult(
+                method_used=method,
+                function_changes=[],
+                summary="No meaningful content to analyze",
+                confidence_score=0.0,
+                recommendations=["No changes detected"],
+                performance_impact="none",
+                risk_level="low"
+            )
+        
         # Perform analysis based on chosen method
         try:
             if method == AnalysisMethod.AST_ONLY:
@@ -409,31 +422,52 @@ class SmartAnalysisService:
             print(f"[DEBUG] Regex extracted - Old functions: {list(old_functions.keys())}")
             print(f"[DEBUG] Regex extracted - New functions: {list(new_functions.keys())}")
             
-            # Create function changes from regex analysis as baseline
-            regex_changes = []
-            all_function_names = set(old_functions.keys()) | set(new_functions.keys())
+            # If no functions found by regex, try to analyze content structure
+            if not old_functions and not new_functions:
+                print(f"[DEBUG] No functions found by regex, analyzing content structure")
+                
+                # Check if there's meaningful code content
+                old_lines = [line.strip() for line in old_content.split('\n') if line.strip()]
+                new_lines = [line.strip() for line in new_content.split('\n') if line.strip()]
+                
+                print(f"[DEBUG] Old content has {len(old_lines)} non-empty lines")
+                print(f"[DEBUG] New content has {len(new_lines)} non-empty lines")
+                
+                # If there are significant differences, create a generic change
+                if len(old_lines) != len(new_lines) or old_lines != new_lines:
+                    print(f"[DEBUG] Content differences detected, creating generic change")
+                    regex_changes.append(FunctionChange(
+                        name=f"content_change_{os.path.basename(file_path)}",
+                        change_type=ChangeType.MODIFIED,
+                        old_content=old_content[:200] + "..." if len(old_content) > 200 else old_content,
+                        new_content=new_content[:200] + "..." if len(new_content) > 200 else new_content
+                    ))
             
-            for name in all_function_names:
-                if name in old_functions and name in new_functions:
-                    if self._normalize_content(old_functions[name]) != self._normalize_content(new_functions[name]):
+            # Create function changes from regex analysis as baseline
+            if not regex_changes:  # Only process functions if we haven't already added content changes
+                all_function_names = set(old_functions.keys()) | set(new_functions.keys())
+                
+                for name in all_function_names:
+                    if name in old_functions and name in new_functions:
+                        if self._normalize_content(old_functions[name]) != self._normalize_content(new_functions[name]):
+                            regex_changes.append(FunctionChange(
+                                name=name,
+                                change_type=ChangeType.MODIFIED,
+                                old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name],
+                                new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
+                            ))
+                    elif name in new_functions:
                         regex_changes.append(FunctionChange(
                             name=name,
-                            change_type=ChangeType.MODIFIED,
-                            old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name],
+                            change_type=ChangeType.ADDED,
                             new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
                         ))
-                elif name in new_functions:
-                    regex_changes.append(FunctionChange(
-                        name=name,
-                        change_type=ChangeType.ADDED,
-                        new_content=new_functions[name][:200] + "..." if len(new_functions[name]) > 200 else new_functions[name]
-                    ))
-                elif name in old_functions:
-                    regex_changes.append(FunctionChange(
-                        name=name,
-                        change_type=ChangeType.DELETED,
-                        old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name]
-                    ))
+                    elif name in old_functions:
+                        regex_changes.append(FunctionChange(
+                            name=name,
+                            change_type=ChangeType.DELETED,
+                            old_content=old_functions[name][:200] + "..." if len(old_functions[name]) > 200 else old_functions[name]
+                        ))
             
             print(f"[DEBUG] Regex analysis found {len(regex_changes)} function changes")
             
@@ -580,6 +614,22 @@ IMPORTANT:
                 print(f"[DEBUG] LLM found no functions, using regex results: {len(regex_changes)} changes")
                 function_changes = regex_changes
                 analysis_data["summary"] = f"Used regex analysis. Found {len(regex_changes)} function changes: {', '.join([c.name for c in regex_changes])}"
+            
+            # Ensure we have at least some analysis if content changed
+            if not function_changes:
+                # Check if there are actual content differences
+                old_normalized = self._normalize_content(old_content)
+                new_normalized = self._normalize_content(new_content)
+                
+                if old_normalized != new_normalized:
+                    print(f"[DEBUG] Content differs but no functions detected, creating generic change")
+                    function_changes = [FunctionChange(
+                        name=f"file_change_{os.path.basename(file_path)}",
+                        change_type=ChangeType.MODIFIED,
+                        old_content=old_content[:200] + "..." if len(old_content) > 200 else old_content,
+                        new_content=new_content[:200] + "..." if len(new_content) > 200 else new_content
+                    )]
+                    analysis_data["summary"] = f"File content changed but no specific functions detected. Generic change recorded."
             
             print(f"[DEBUG] LLM found {len(function_changes)} function changes")
             for i, change in enumerate(function_changes):
