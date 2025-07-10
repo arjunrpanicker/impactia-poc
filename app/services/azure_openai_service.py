@@ -22,7 +22,7 @@ class AzureOpenAIService:
 
     async def get_embeddings(self, text: str) -> List[float]:
         """Get embeddings for text using Azure OpenAI"""
-        response = self.client.embeddings.create(
+        response = await self.client.embeddings.create(
             model=self.embeddings_deployment,
             input=text
         )
