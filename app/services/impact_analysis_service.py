@@ -1,95 +1,110 @@
 """
-Comprehensive Impact Analysis Service
-Focuses on generating meaningful, plain-English impact summaries for test case generation
+Impact Analysis Service - Focused on change impact and dependency tracking
 """
 import os
 import re
 import json
+import hashlib
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
-from enum import Enum
 
 from .azure_openai_service import AzureOpenAIService
+from .enhanced_rag_service import EnhancedRAGService
+from .diff_service import generate_functional_diff
 from ..models.analysis import CodeChange
-
-class ImpactCategory(Enum):
-    BUSINESS_LOGIC = "business_logic"
-    DATA_PROCESSING = "data_processing"
-    USER_INTERFACE = "user_interface"
-    API_ENDPOINTS = "api_endpoints"
-    AUTHENTICATION = "authentication"
-    VALIDATION = "validation"
-    CONFIGURATION = "configuration"
-    INTEGRATION = "integration"
-    PERFORMANCE = "performance"
-    ERROR_HANDLING = "error_handling"
+from ..utils.diff_utils import GitDiffExtractor, is_diff_format
 
 @dataclass
-class ImpactArea:
-    category: ImpactCategory
-    description: str
-    affected_functionality: List[str]
-    test_scenarios: List[str]
-    risk_level: str
-    user_impact: str
+class ChangedFile:
+    file_path: str
+    functional_summary: str
 
 @dataclass
-class ComprehensiveImpactAnalysis:
+class ImpactedFile:
+    file_path: str
+    impact_reason: str
+    impact_description: str
+
+@dataclass
+class ImpactAnalysisResult:
     summary: str
-    impact_areas: List[ImpactArea]
-    overall_risk: str
-    testing_priority: str
-    recommended_test_types: List[str]
-    potential_side_effects: List[str]
-    rollback_considerations: List[str]
+    changed_files: List[ChangedFile]
+    impacted_files: List[ImpactedFile]
 
 class ImpactAnalysisService:
-    """Service focused on comprehensive impact analysis for test generation"""
+    """Service focused on change impact analysis and dependency tracking"""
     
     def __init__(self):
         self.openai_service = AzureOpenAIService()
+        self.rag_service = EnhancedRAGService()
 
-    async def analyze_comprehensive_impact(self, changes: List[CodeChange]) -> ComprehensiveImpactAnalysis:
-        """Generate comprehensive impact analysis focused on testing needs"""
+    async def analyze_impact(self, changes: List[CodeChange]) -> ImpactAnalysisResult:
+        """Analyze the impact of code changes and track their ripple effects"""
         
-        print(f"[DEBUG] Starting comprehensive impact analysis for {len(changes)} changes")
+        print(f"[DEBUG] Starting impact analysis for {len(changes)} changes")
         
-        # Prepare change context
-        change_context = self._prepare_change_context(changes)
+        # Step 1: Analyze each changed file
+        changed_files = []
+        for change in changes:
+            functional_summary = await self._analyze_changed_file(change)
+            changed_files.append(ChangedFile(
+                file_path=change.file_path,
+                functional_summary=functional_summary
+            ))
         
-        # Generate impact analysis using LLM
-        impact_analysis = await self._generate_impact_analysis(change_context)
+        print(f"[DEBUG] Analyzed {len(changed_files)} changed files")
         
-        # Parse and structure the analysis
-        structured_analysis = self._structure_analysis(impact_analysis, changes)
+        # Step 2: Find impacted files through dependency analysis
+        impacted_files = await self._find_impacted_files(changes)
         
-        return structured_analysis
+        print(f"[DEBUG] Found {len(impacted_files)} impacted files")
+        
+        # Step 3: Generate overall summary
+        summary = await self._generate_overall_summary(changed_files, impacted_files)
+        
+        return ImpactAnalysisResult(
+            summary=summary,
+            changed_files=changed_files,
+            impacted_files=impacted_files
+        )
 
-    def _prepare_change_context(self, changes: List[CodeChange]) -> str:
-        """Prepare a comprehensive context of all changes"""
-        context_parts = []
+    async def _analyze_changed_file(self, change: CodeChange) -> str:
+        """Analyze a single changed file to understand what changed functionally"""
         
-        for i, change in enumerate(changes, 1):
-            context_parts.append(f"\n=== CHANGE {i}: {change.file_path} ===")
-            context_parts.append(f"Change Type: {change.change_type}")
+        print(f"[DEBUG] Analyzing changed file: {change.file_path}")
+        
+        if change.diff:
+            # Extract old and new content from diff
+            file_changes = GitDiffExtractor.extract_file_changes(change.diff)
             
-            if change.diff:
-                # Extract meaningful parts from diff
-                diff_summary = self._extract_diff_summary(change.diff)
-                context_parts.append(f"Changes Summary:\n{diff_summary}")
-            elif change.content:
-                # Analyze content for key patterns
-                content_analysis = self._analyze_content_patterns(change.content, change.file_path)
-                context_parts.append(f"Content Analysis:\n{content_analysis}")
+            if change.file_path in file_changes:
+                file_change = file_changes[change.file_path]
+                old_content = file_change['old_content']
+                new_content = file_change['new_content']
+                
+                # Use functional diff analysis
+                functional_summary = generate_functional_diff(old_content, new_content, "file_analysis")
+                
+                if functional_summary and "Analysis failed" not in functional_summary:
+                    return functional_summary
             
-            context_parts.append("---")
+            # Fallback: analyze diff directly
+            return await self._analyze_diff_content(change.diff, change.file_path)
         
-        return "\n".join(context_parts)
+        elif change.content:
+            # New file or full content provided
+            if change.change_type == "added":
+                return await self._analyze_new_file_content(change.content, change.file_path)
+            else:
+                return await self._analyze_file_content(change.content, change.file_path)
+        
+        return f"Changes detected in {change.file_path} but unable to determine specific functional impact"
 
-    def _extract_diff_summary(self, diff_content: str) -> str:
-        """Extract meaningful summary from diff content"""
+    async def _analyze_diff_content(self, diff_content: str, file_path: str) -> str:
+        """Analyze diff content to understand functional changes"""
+        
+        # Extract key changes from diff
         lines = diff_content.split('\n')
-        
         added_lines = []
         removed_lines = []
         modified_functions = []
@@ -97,244 +112,307 @@ class ImpactAnalysisService:
         for line in lines:
             if line.startswith('+') and not line.startswith('+++'):
                 clean_line = line[1:].strip()
-                if clean_line and not clean_line.startswith('//') and not clean_line.startswith('#'):
+                if clean_line and not clean_line.startswith(('//','#','/*')):
                     added_lines.append(clean_line)
                     
                     # Check for function definitions
-                    if any(keyword in clean_line.lower() for keyword in ['def ', 'function ', 'class ', 'method']):
-                        func_match = re.search(r'(def|function|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', clean_line)
-                        if func_match:
-                            modified_functions.append(f"Added {func_match.group(1)}: {func_match.group(2)}")
+                    func_match = re.search(r'(def|function|class|method)\s+([a-zA-Z_][a-zA-Z0-9_]*)', clean_line)
+                    if func_match:
+                        modified_functions.append(f"Added {func_match.group(1)} '{func_match.group(2)}'")
             
             elif line.startswith('-') and not line.startswith('---'):
                 clean_line = line[1:].strip()
-                if clean_line and not clean_line.startswith('//') and not clean_line.startswith('#'):
+                if clean_line and not clean_line.startswith(('//','#','/*')):
                     removed_lines.append(clean_line)
                     
                     # Check for function definitions
-                    if any(keyword in clean_line.lower() for keyword in ['def ', 'function ', 'class ', 'method']):
-                        func_match = re.search(r'(def|function|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', clean_line)
-                        if func_match:
-                            modified_functions.append(f"Removed {func_match.group(1)}: {func_match.group(2)}")
+                    func_match = re.search(r'(def|function|class|method)\s+([a-zA-Z_][a-zA-Z0-9_]*)', clean_line)
+                    if func_match:
+                        modified_functions.append(f"Removed {func_match.group(1)} '{func_match.group(2)}'")
         
+        # Generate summary
         summary_parts = []
         
         if modified_functions:
-            summary_parts.append(f"Function Changes: {'; '.join(modified_functions[:5])}")
+            summary_parts.append(f"Function changes: {'; '.join(modified_functions[:3])}")
         
-        if added_lines:
-            summary_parts.append(f"Key Additions ({len(added_lines)} lines): {'; '.join(added_lines[:3])}")
+        # Detect patterns in changes
+        change_patterns = self._detect_change_patterns(added_lines + removed_lines)
+        if change_patterns:
+            summary_parts.append(f"Key changes: {', '.join(change_patterns)}")
         
-        if removed_lines:
-            summary_parts.append(f"Key Removals ({len(removed_lines)} lines): {'; '.join(removed_lines[:3])}")
+        if not summary_parts:
+            line_changes = len(added_lines) + len(removed_lines)
+            summary_parts.append(f"Modified {line_changes} lines of code")
         
-        return '\n'.join(summary_parts) if summary_parts else "Minor changes detected"
+        return '. '.join(summary_parts)
 
-    def _analyze_content_patterns(self, content: str, file_path: str) -> str:
-        """Analyze content for key patterns and functionality"""
-        patterns = {
-            'api_endpoints': [r'@app\.route', r'@router\.', r'app\.get|app\.post|app\.put|app\.delete', r'endpoint\s*=', r'path\s*='],
-            'database_operations': [r'\.query\(', r'\.insert\(', r'\.update\(', r'\.delete\(', r'SELECT\s+', r'INSERT\s+', r'UPDATE\s+', r'DELETE\s+'],
-            'authentication': [r'auth', r'login', r'password', r'token', r'session', r'permission', r'role'],
-            'validation': [r'validate', r'check', r'verify', r'assert', r'raise\s+\w*Error', r'if\s+not\s+'],
-            'business_logic': [r'calculate', r'process', r'transform', r'generate', r'compute', r'algorithm'],
-            'ui_components': [r'render', r'component', r'template', r'html', r'css', r'style', r'onclick', r'onchange'],
-            'error_handling': [r'try:', r'except', r'catch', r'error', r'exception', r'finally'],
-            'configuration': [r'config', r'setting', r'environment', r'env', r'constant', r'CONST'],
-            'integration': [r'api', r'service', r'client', r'request', r'response', r'webhook', r'callback']
-        }
+    async def _analyze_new_file_content(self, content: str, file_path: str) -> str:
+        """Analyze new file content"""
         
-        detected_patterns = {}
-        content_lower = content.lower()
-        
-        for category, pattern_list in patterns.items():
-            matches = []
-            for pattern in pattern_list:
-                if re.search(pattern, content_lower):
-                    matches.append(pattern)
-            
-            if matches:
-                detected_patterns[category] = len(matches)
-        
-        # Extract function names
+        # Extract functions and key patterns
         functions = re.findall(r'(?:def|function|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', content)
+        patterns = self._detect_change_patterns(content.split('\n'))
         
-        analysis_parts = []
+        summary_parts = []
         
         if functions:
-            analysis_parts.append(f"Functions/Classes: {', '.join(functions[:5])}")
+            summary_parts.append(f"New file with {len(functions)} functions/classes: {', '.join(functions[:3])}")
         
-        if detected_patterns:
-            pattern_summary = ', '.join([f"{cat}: {count}" for cat, count in detected_patterns.items()])
-            analysis_parts.append(f"Detected Patterns: {pattern_summary}")
+        if patterns:
+            summary_parts.append(f"Implements: {', '.join(patterns)}")
         
-        # File type analysis
-        file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext in ['.html', '.css', '.js', '.jsx', '.tsx', '.vue']:
-            analysis_parts.append("File Type: Frontend/UI component")
-        elif file_ext in ['.py', '.java', '.cs', '.go']:
-            analysis_parts.append("File Type: Backend/Business logic")
-        elif file_ext in ['.sql', '.db']:
-            analysis_parts.append("File Type: Database/Data layer")
+        if not summary_parts:
+            summary_parts.append(f"New file added: {os.path.basename(file_path)}")
         
-        return '\n'.join(analysis_parts) if analysis_parts else "Standard code file"
+        return '. '.join(summary_parts)
 
-    async def _generate_impact_analysis(self, change_context: str) -> str:
-        """Generate comprehensive impact analysis using LLM"""
+    async def _analyze_file_content(self, content: str, file_path: str) -> str:
+        """Analyze general file content for changes"""
+        
+        # Use LLM for content analysis if it's complex
+        if len(content) > 500:
+            return await self._llm_analyze_content(content, file_path)
+        
+        # Simple pattern analysis for smaller files
+        patterns = self._detect_change_patterns(content.split('\n'))
+        functions = re.findall(r'(?:def|function|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)', content)
+        
+        summary_parts = []
+        
+        if functions:
+            summary_parts.append(f"Contains {len(functions)} functions/classes")
+        
+        if patterns:
+            summary_parts.append(f"Implements: {', '.join(patterns)}")
+        
+        return '. '.join(summary_parts) if summary_parts else f"File content updated: {os.path.basename(file_path)}"
+
+    def _detect_change_patterns(self, lines: List[str]) -> List[str]:
+        """Detect common patterns in code changes"""
+        
+        patterns = []
+        content = '\n'.join(lines).lower()
+        
+        pattern_map = {
+            'validation': ['validate', 'check', 'verify', 'assert'],
+            'authentication': ['auth', 'login', 'password', 'token'],
+            'database operations': ['query', 'insert', 'update', 'delete', 'select'],
+            'API endpoints': ['route', 'endpoint', 'api', '@app.', '@router.'],
+            'error handling': ['try:', 'except', 'catch', 'error', 'exception'],
+            'logging': ['log', 'logger', 'debug', 'info', 'warn', 'error'],
+            'configuration': ['config', 'setting', 'env', 'constant'],
+            'business logic': ['calculate', 'process', 'transform', 'generate']
+        }
+        
+        for pattern_name, keywords in pattern_map.items():
+            if any(keyword in content for keyword in keywords):
+                patterns.append(pattern_name)
+        
+        return patterns[:3]  # Limit to top 3 patterns
+
+    async def _llm_analyze_content(self, content: str, file_path: str) -> str:
+        """Use LLM to analyze complex content changes"""
         
         prompt = f"""
-You are a senior QA engineer and system analyst. Analyze the following code changes and provide a comprehensive impact analysis that will help generate test cases.
+Analyze this code file and provide a brief functional summary of what it does:
 
-CHANGES TO ANALYZE:
-{change_context}
+File: {file_path}
+Content (first 1000 chars):
+{content[:1000]}
 
-Please provide a detailed analysis in the following JSON format:
+Provide a concise summary in 1-2 sentences focusing on:
+1. What functionality this code implements
+2. Key operations or business logic
+3. Any notable patterns (API, database, validation, etc.)
 
-{{
-    "summary": "A clear, plain-English summary of what changed and the overall impact",
-    "impact_areas": [
-        {{
-            "category": "business_logic|data_processing|user_interface|api_endpoints|authentication|validation|configuration|integration|performance|error_handling",
-            "description": "Plain English description of what's impacted in this area",
-            "affected_functionality": ["List of specific features/functions affected"],
-            "test_scenarios": ["Specific test scenarios to validate this impact"],
-            "risk_level": "low|medium|high|critical",
-            "user_impact": "How this affects end users"
-        }}
-    ],
-    "overall_risk": "low|medium|high|critical",
-    "testing_priority": "low|medium|high|critical",
-    "recommended_test_types": ["unit", "integration", "e2e", "performance", "security", "regression"],
-    "potential_side_effects": ["List of potential unintended consequences"],
-    "rollback_considerations": ["What to consider if rollback is needed"]
-}}
-
-FOCUS ON:
-1. **Business Impact**: How do these changes affect what users can do?
-2. **Data Flow**: How is data processing, storage, or retrieval affected?
-3. **User Experience**: What changes in user interactions or interface?
-4. **System Integration**: How do these changes affect connections between components?
-5. **Risk Assessment**: What could go wrong and how likely is it?
-6. **Test Strategy**: What specific tests are needed to validate these changes?
-
-PROVIDE ACTIONABLE INSIGHTS that help create comprehensive test plans.
+Keep it under 100 words and focus on functional impact.
 """
-
+        
         try:
             response = self.openai_service.client.chat.completions.create(
                 model=self.openai_service.deployment_name,
                 messages=[
-                    {
-                        "role": "system", 
-                        "content": "You are a senior QA engineer and system analyst. Provide comprehensive, actionable impact analysis for test planning. Always respond with valid JSON only."
-                    },
+                    {"role": "system", "content": "You are a code analyst. Provide concise functional summaries."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.1,
-                max_tokens=2000,
-                response_format={"type": "json_object"}
+                max_tokens=150
             )
             
             return response.choices[0].message.content.strip()
             
         except Exception as e:
-            print(f"[DEBUG] LLM analysis failed: {str(e)}")
-            # Return fallback analysis
-            return self._generate_fallback_analysis(change_context)
+            print(f"[DEBUG] LLM content analysis failed: {e}")
+            return f"Code changes in {os.path.basename(file_path)}"
 
-    def _generate_fallback_analysis(self, change_context: str) -> str:
-        """Generate fallback analysis when LLM fails"""
+    async def _find_impacted_files(self, changes: List[CodeChange]) -> List[ImpactedFile]:
+        """Find files impacted by the changes through dependency analysis"""
         
-        # Count changes and extract basic info
-        change_count = change_context.count("=== CHANGE")
-        has_functions = bool(re.search(r'(def|function|class)', change_context, re.IGNORECASE))
-        has_api = bool(re.search(r'(route|endpoint|api)', change_context, re.IGNORECASE))
-        has_database = bool(re.search(r'(query|insert|update|delete|database)', change_context, re.IGNORECASE))
+        print(f"[DEBUG] Finding impacted files for {len(changes)} changes")
         
-        fallback_analysis = {
-            "summary": f"Analysis of {change_count} code changes. {'Functions/classes modified. ' if has_functions else ''}{'API endpoints affected. ' if has_api else ''}{'Database operations involved.' if has_database else ''}",
-            "impact_areas": [],
-            "overall_risk": "medium",
-            "testing_priority": "medium",
-            "recommended_test_types": ["unit", "integration"],
-            "potential_side_effects": ["Potential breaking changes", "Data consistency issues"],
-            "rollback_considerations": ["Backup current state", "Test rollback procedure"]
-        }
-        
-        # Add impact areas based on detected patterns
-        if has_functions:
-            fallback_analysis["impact_areas"].append({
-                "category": "business_logic",
-                "description": "Business logic functions have been modified",
-                "affected_functionality": ["Core application logic"],
-                "test_scenarios": ["Test modified functions with various inputs", "Verify business rules still apply"],
-                "risk_level": "medium",
-                "user_impact": "May affect core functionality"
-            })
-        
-        if has_api:
-            fallback_analysis["impact_areas"].append({
-                "category": "api_endpoints",
-                "description": "API endpoints have been modified",
-                "affected_functionality": ["API responses", "Request handling"],
-                "test_scenarios": ["Test API endpoints with various payloads", "Verify response formats"],
-                "risk_level": "high",
-                "user_impact": "May affect client applications"
-            })
-        
-        if has_database:
-            fallback_analysis["impact_areas"].append({
-                "category": "data_processing",
-                "description": "Database operations have been modified",
-                "affected_functionality": ["Data storage", "Data retrieval"],
-                "test_scenarios": ["Test data operations", "Verify data integrity"],
-                "risk_level": "high",
-                "user_impact": "May affect data consistency"
-            })
-        
-        return json.dumps(fallback_analysis)
-
-    def _structure_analysis(self, analysis_json: str, changes: List[CodeChange]) -> ComprehensiveImpactAnalysis:
-        """Structure the analysis into the final format"""
+        impacted_files = []
         
         try:
-            analysis_data = json.loads(analysis_json)
-        except json.JSONDecodeError as e:
-            print(f"[DEBUG] Failed to parse analysis JSON: {e}")
-            # Create minimal analysis
-            analysis_data = {
-                "summary": f"Analysis of {len(changes)} code changes",
-                "impact_areas": [],
-                "overall_risk": "medium",
-                "testing_priority": "medium",
-                "recommended_test_types": ["unit", "integration"],
-                "potential_side_effects": ["Manual review required"],
-                "rollback_considerations": ["Backup current state"]
-            }
+            # Use RAG service to find related code
+            related_code = await self.rag_service.get_related_code(changes)
+            
+            print(f"[DEBUG] RAG analysis completed")
+            
+            # Process dependency chains
+            dependency_chains = related_code.get("dependency_chains", [])
+            for chain in dependency_chains:
+                source_file = chain.get("file_path", "")
+                dependent_files = chain.get("dependent_files", [])
+                
+                for dep_file in dependent_files:
+                    dep_file_path = dep_file.get("file_path", "")
+                    methods = dep_file.get("methods", [])
+                    
+                    if dep_file_path and dep_file_path != source_file:
+                        # Determine impact reason and description
+                        impact_reason, impact_description = self._analyze_dependency_impact(
+                            source_file, dep_file_path, methods
+                        )
+                        
+                        impacted_files.append(ImpactedFile(
+                            file_path=dep_file_path,
+                            impact_reason=impact_reason,
+                            impact_description=impact_description
+                        ))
+            
+            # Process direct dependencies
+            direct_deps = related_code.get("direct_dependencies", {})
+            incoming_refs = direct_deps.get("incoming", [])
+            
+            for ref_file in incoming_refs:
+                if not any(imp.file_path == ref_file for imp in impacted_files):
+                    impacted_files.append(ImpactedFile(
+                        file_path=ref_file,
+                        impact_reason="Direct dependency reference",
+                        impact_description=f"File references changed code and may be affected by modifications"
+                    ))
+            
+            # Process similar files (potential indirect impact)
+            similar_files = related_code.get("similar_code", {}).get("files", [])
+            for similar_file in similar_files[:5]:  # Limit to top 5
+                file_path = similar_file.get("path", "")
+                similarity = similar_file.get("similarity", 0)
+                
+                if file_path and similarity > 0.8:  # High similarity threshold
+                    if not any(imp.file_path == file_path for imp in impacted_files):
+                        impacted_files.append(ImpactedFile(
+                            file_path=file_path,
+                            impact_reason="Similar code patterns",
+                            impact_description=f"Contains similar code patterns (similarity: {similarity:.2f}) and may need consistent updates"
+                        ))
+            
+        except Exception as e:
+            print(f"[DEBUG] Error in dependency analysis: {e}")
+            # Continue with empty impacted files list
         
-        # Convert to structured format
-        impact_areas = []
-        for area_data in analysis_data.get("impact_areas", []):
-            try:
-                impact_area = ImpactArea(
-                    category=ImpactCategory(area_data.get("category", "business_logic")),
-                    description=area_data.get("description", ""),
-                    affected_functionality=area_data.get("affected_functionality", []),
-                    test_scenarios=area_data.get("test_scenarios", []),
-                    risk_level=area_data.get("risk_level", "medium"),
-                    user_impact=area_data.get("user_impact", "")
-                )
-                impact_areas.append(impact_area)
-            except (ValueError, KeyError) as e:
-                print(f"[DEBUG] Error processing impact area: {e}")
-                continue
+        # Remove duplicates
+        unique_impacted = []
+        seen_paths = set()
         
-        return ComprehensiveImpactAnalysis(
-            summary=analysis_data.get("summary", "Code changes analyzed"),
-            impact_areas=impact_areas,
-            overall_risk=analysis_data.get("overall_risk", "medium"),
-            testing_priority=analysis_data.get("testing_priority", "medium"),
-            recommended_test_types=analysis_data.get("recommended_test_types", ["unit", "integration"]),
-            potential_side_effects=analysis_data.get("potential_side_effects", []),
-            rollback_considerations=analysis_data.get("rollback_considerations", [])
-        )
+        for imp_file in impacted_files:
+            if imp_file.file_path not in seen_paths:
+                unique_impacted.append(imp_file)
+                seen_paths.add(imp_file.file_path)
+        
+        print(f"[DEBUG] Found {len(unique_impacted)} unique impacted files")
+        return unique_impacted
+
+    def _analyze_dependency_impact(self, source_file: str, dependent_file: str, methods: List[Dict]) -> tuple[str, str]:
+        """Analyze the specific impact relationship between files"""
+        
+        if not methods:
+            return "File dependency", f"Depends on changes in {os.path.basename(source_file)}"
+        
+        # Analyze method relationships
+        method_summaries = []
+        impact_types = []
+        
+        for method in methods:
+            method_name = method.get("name", "")
+            method_summary = method.get("summary", "")
+            
+            if method_name:
+                method_summaries.append(method_name)
+                
+                # Determine impact type from summary
+                if any(keyword in method_summary.lower() for keyword in ["calls", "invokes", "uses"]):
+                    impact_types.append("method_call")
+                elif any(keyword in method_summary.lower() for keyword in ["inherits", "extends"]):
+                    impact_types.append("inheritance")
+                elif any(keyword in method_summary.lower() for keyword in ["imports", "references"]):
+                    impact_types.append("import_reference")
+        
+        # Generate impact reason
+        if "method_call" in impact_types:
+            impact_reason = f"Calls methods: {', '.join(method_summaries[:3])}"
+        elif "inheritance" in impact_types:
+            impact_reason = f"Inherits from modified classes"
+        elif "import_reference" in impact_types:
+            impact_reason = f"Imports/references modified code"
+        else:
+            impact_reason = f"Uses methods: {', '.join(method_summaries[:3])}"
+        
+        # Generate impact description
+        if len(method_summaries) == 1:
+            impact_description = f"Behavior may change due to modifications in the '{method_summaries[0]}' method"
+        elif len(method_summaries) > 1:
+            impact_description = f"Multiple dependencies on changed methods may affect functionality"
+        else:
+            impact_description = f"Dependent on changes in {os.path.basename(source_file)} and may require updates"
+        
+        return impact_reason, impact_description
+
+    async def _generate_overall_summary(self, changed_files: List[ChangedFile], impacted_files: List[ImpactedFile]) -> str:
+        """Generate an overall summary of the impact analysis"""
+        
+        # Extract key information
+        total_changed = len(changed_files)
+        total_impacted = len(impacted_files)
+        
+        # Analyze change types
+        change_summaries = [cf.functional_summary for cf in changed_files]
+        combined_changes = ' '.join(change_summaries)
+        
+        # Detect major change categories
+        categories = []
+        if any(keyword in combined_changes.lower() for keyword in ['function', 'method', 'class']):
+            categories.append("code structure")
+        if any(keyword in combined_changes.lower() for keyword in ['api', 'endpoint', 'route']):
+            categories.append("API endpoints")
+        if any(keyword in combined_changes.lower() for keyword in ['database', 'query', 'insert', 'update']):
+            categories.append("database operations")
+        if any(keyword in combined_changes.lower() for keyword in ['validation', 'check', 'verify']):
+            categories.append("validation logic")
+        if any(keyword in combined_changes.lower() for keyword in ['auth', 'login', 'permission']):
+            categories.append("authentication")
+        
+        # Generate summary
+        summary_parts = []
+        
+        if total_changed == 1:
+            summary_parts.append(f"Modified {changed_files[0].file_path}")
+        else:
+            summary_parts.append(f"Modified {total_changed} files")
+        
+        if categories:
+            summary_parts.append(f"affecting {', '.join(categories)}")
+        
+        if total_impacted > 0:
+            summary_parts.append(f"with {total_impacted} dependent files potentially impacted")
+        
+        # Add key change highlights
+        key_changes = []
+        for cf in changed_files:
+            if len(cf.functional_summary) < 100:  # Include short, clear summaries
+                key_changes.append(cf.functional_summary)
+        
+        if key_changes:
+            summary_parts.append(f"Key changes: {'; '.join(key_changes[:2])}")
+        
+        return '. '.join(summary_parts) + '.'

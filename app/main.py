@@ -321,17 +321,17 @@ async def analyze_changes_smart(
         print(f"[DEBUG] Error in smart analysis: {str(e)}")
         import traceback
         traceback.print_exc()
-@app.post("/analyze/comprehensive")
-async def analyze_comprehensive_impact(
+@app.post("/analyze/impact")
+async def analyze_impact(
     files: List[UploadFile] = File(...),
     update_ado: bool = Form(default=False),
     ado_item_id: str = Form(default=None)
 ):
     """
-    Comprehensive impact analysis focused on test case generation
+    Impact analysis focused on change impact and dependency tracking
     """
     try:
-        print(f"[DEBUG] Comprehensive analysis started with {len(files)} files")
+        print(f"[DEBUG] Impact analysis started with {len(files)} files")
         
         # Validate ADO integration request
         if update_ado and not ENABLE_ADO_INTEGRATION:
@@ -376,51 +376,40 @@ async def analyze_comprehensive_impact(
 
         print(f"[DEBUG] Created {len(changes)} CodeChange objects")
         
-        # Perform comprehensive impact analysis
-        impact_analysis = await impact_analysis_service.analyze_comprehensive_impact(changes)
+        # Perform impact analysis
+        impact_analysis = await impact_analysis_service.analyze_impact(changes)
         
         # Convert to response format
         response = {
             "summary": impact_analysis.summary,
-            "impact_areas": [
+            "changed_files": [
                 {
-                    "category": area.category.value,
-                    "description": area.description,
-                    "affected_functionality": area.affected_functionality,
-                    "test_scenarios": area.test_scenarios,
-                    "risk_level": area.risk_level,
-                    "user_impact": area.user_impact
+                    "file_path": cf.file_path,
+                    "functional_summary": cf.functional_summary
                 }
-                for area in impact_analysis.impact_areas
+                for cf in impact_analysis.changed_files
             ],
-            "overall_risk": impact_analysis.overall_risk,
-            "testing_priority": impact_analysis.testing_priority,
-            "recommended_test_types": impact_analysis.recommended_test_types,
-            "potential_side_effects": impact_analysis.potential_side_effects,
-            "rollback_considerations": impact_analysis.rollback_considerations,
-            "test_case_generation_guide": {
-                "priority_areas": [area.category.value for area in impact_analysis.impact_areas if area.risk_level in ["high", "critical"]],
-                "key_test_scenarios": [scenario for area in impact_analysis.impact_areas for scenario in area.test_scenarios],
-                "risk_mitigation_tests": impact_analysis.potential_side_effects
-            },
-            "analysis_metadata": {
-                "total_files_analyzed": len(changes),
-                "analysis_method": "comprehensive_impact",
-                "focus": "test_case_generation"
-            }
+            "impacted_files": [
+                {
+                    "file_path": imp.file_path,
+                    "impact_reason": imp.impact_reason,
+                    "impact_description": imp.impact_description
+                }
+                for imp in impact_analysis.impacted_files
+            ]
         }
         
-        print(f"[DEBUG] Comprehensive analysis completed")
-        print(f"[DEBUG] Found {len(impact_analysis.impact_areas)} impact areas")
-        print(f"[DEBUG] Overall risk: {impact_analysis.overall_risk}")
+        print(f"[DEBUG] Impact analysis completed")
+        print(f"[DEBUG] Changed files: {len(impact_analysis.changed_files)}")
+        print(f"[DEBUG] Impacted files: {len(impact_analysis.impacted_files)}")
         
         return response
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        
     except Exception as e:
-        print(f"[DEBUG] Error in comprehensive analysis: {str(e)}")
+        print(f"[DEBUG] Error in impact analysis: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Comprehensive analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Impact analysis failed: {str(e)}")
 
 @app.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
 async def analyze_changes_enhanced(
