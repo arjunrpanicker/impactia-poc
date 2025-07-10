@@ -342,6 +342,8 @@ async def analyze_impact(
 
         # Process uploaded files into CodeChange objects
         changes = []
+        all_extracted_files = {}  # Track all files extracted from diffs
+        
         for file in files:
             print(f"[DEBUG] Processing file: {file.filename}")
             content = await file.read()
@@ -357,12 +359,33 @@ async def analyze_impact(
             # Create CodeChange object
             if is_diff_format(text_content):
                 print(f"[DEBUG] File {file.filename} is in diff format")
-                changes.append(CodeChange(
-                    file_path=file.filename,
-                    content=None,
-                    diff=text_content,
-                    change_type="modified"
-                ))
+                
+                # Extract actual files from the diff
+                from .utils.diff_utils import GitDiffExtractor
+                file_changes = GitDiffExtractor.extract_file_changes(text_content)
+                
+                print(f"[DEBUG] Extracted {len(file_changes)} files from diff {file.filename}")
+                
+                if file_changes:
+                    # Create CodeChange objects for each file in the diff
+                    for file_path, change_data in file_changes.items():
+                        print(f"[DEBUG] Creating change for extracted file: {file_path}")
+                        changes.append(CodeChange(
+                            file_path=file_path,
+                            content=None,
+                            diff=text_content,  # Keep original diff for context
+                            change_type="modified"
+                        ))
+                        all_extracted_files[file_path] = change_data
+                else:
+                    # Fallback: treat the diff file itself as changed
+                    print(f"[DEBUG] No files extracted from diff, treating {file.filename} as changed file")
+                    changes.append(CodeChange(
+                        file_path=file.filename,
+                        content=None,
+                        diff=text_content,
+                        change_type="modified"
+                    ))
             else:
                 print(f"[DEBUG] File {file.filename} is regular content")
                 changes.append(CodeChange(
@@ -379,16 +402,28 @@ async def analyze_impact(
         # Perform impact analysis
         impact_analysis = await impact_analysis_service.analyze_impact(changes)
         
-        # Convert to response format
+        # Convert to response format - handle extracted files properly
+        changed_files_response = []
+        
+        # Group by actual file paths (in case multiple changes refer to same file)
+        file_summaries = {}
+        for cf in impact_analysis.changed_files:
+            if cf.file_path in file_summaries:
+                # Combine summaries for the same file
+                file_summaries[cf.file_path] += f"; {cf.functional_summary}"
+            else:
+                file_summaries[cf.file_path] = cf.functional_summary
+        
+        # Create response objects
+        for file_path, summary in file_summaries.items():
+            changed_files_response.append({
+                "file_path": file_path,
+                "functional_summary": summary
+            })
+        
         response = {
             "summary": impact_analysis.summary,
-            "changed_files": [
-                {
-                    "file_path": cf.file_path,
-                    "functional_summary": cf.functional_summary
-                }
-                for cf in impact_analysis.changed_files
-            ],
+            "changed_files": changed_files_response,
             "impacted_files": [
                 {
                     "file_path": imp.file_path,

@@ -74,22 +74,40 @@ class ImpactAnalysisService:
         print(f"[DEBUG] Analyzing changed file: {change.file_path}")
         
         if change.diff:
-            # Extract old and new content from diff
+            # Extract actual file changes from diff content
+            print(f"[DEBUG] Extracting file changes from diff content")
             file_changes = GitDiffExtractor.extract_file_changes(change.diff)
             
-            if change.file_path in file_changes:
-                file_change = file_changes[change.file_path]
-                old_content = file_change['old_content']
-                new_content = file_change['new_content']
-                
-                # Use functional diff analysis
-                functional_summary = generate_functional_diff(old_content, new_content, "file_analysis")
-                
-                if functional_summary and "Analysis failed" not in functional_summary:
-                    return functional_summary
+            print(f"[DEBUG] Found {len(file_changes)} files in diff")
+            for file_path in file_changes.keys():
+                print(f"[DEBUG] - File: {file_path}")
             
-            # Fallback: analyze diff directly
-            return await self._analyze_diff_content(change.diff, change.file_path)
+            if file_changes:
+                # Process each file found in the diff
+                summaries = []
+                for file_path, file_change in file_changes.items():
+                    old_content = file_change['old_content']
+                    new_content = file_change['new_content']
+                    
+                    print(f"[DEBUG] Analyzing file: {file_path}")
+                    print(f"[DEBUG] Old content length: {len(old_content)}")
+                    print(f"[DEBUG] New content length: {len(new_content)}")
+                    
+                    # Use functional diff analysis
+                    functional_summary = generate_functional_diff(old_content, new_content, "file_analysis")
+                    
+                    if functional_summary and "Analysis failed" not in functional_summary:
+                        summaries.append(f"{os.path.basename(file_path)}: {functional_summary}")
+                    else:
+                        # Fallback to pattern analysis
+                        pattern_summary = await self._analyze_file_changes_pattern(old_content, new_content, file_path)
+                        summaries.append(f"{os.path.basename(file_path)}: {pattern_summary}")
+                
+                return "; ".join(summaries) if summaries else "Changes detected but unable to determine functional impact"
+            else:
+                # Fallback: analyze diff directly
+                print(f"[DEBUG] No files extracted from diff, analyzing diff content directly")
+                return await self._analyze_diff_content(change.diff, change.file_path)
         
         elif change.content:
             # New file or full content provided
@@ -144,6 +162,55 @@ class ImpactAnalysisService:
         if not summary_parts:
             line_changes = len(added_lines) + len(removed_lines)
             summary_parts.append(f"Modified {line_changes} lines of code")
+        
+        return '. '.join(summary_parts)
+
+    async def _analyze_file_changes_pattern(self, old_content: str, new_content: str, file_path: str) -> str:
+        """Analyze changes between old and new content using pattern detection"""
+        
+        print(f"[DEBUG] Pattern analysis for {file_path}")
+        
+        # Extract functions from both versions
+        old_functions = set(re.findall(r'(?:def|function|class|method)\s+([a-zA-Z_][a-zA-Z0-9_]*)', old_content))
+        new_functions = set(re.findall(r'(?:def|function|class|method)\s+([a-zA-Z_][a-zA-Z0-9_]*)', new_content))
+        
+        # Detect function changes
+        added_functions = new_functions - old_functions
+        removed_functions = old_functions - new_functions
+        
+        # Detect pattern changes
+        old_patterns = self._detect_change_patterns(old_content.split('\n'))
+        new_patterns = self._detect_change_patterns(new_content.split('\n'))
+        
+        added_patterns = set(new_patterns) - set(old_patterns)
+        removed_patterns = set(old_patterns) - set(new_patterns)
+        
+        # Build summary
+        summary_parts = []
+        
+        if added_functions:
+            summary_parts.append(f"Added functions: {', '.join(list(added_functions)[:3])}")
+        
+        if removed_functions:
+            summary_parts.append(f"Removed functions: {', '.join(list(removed_functions)[:3])}")
+        
+        if added_patterns:
+            summary_parts.append(f"Added: {', '.join(list(added_patterns)[:3])}")
+        
+        if removed_patterns:
+            summary_parts.append(f"Removed: {', '.join(list(removed_patterns)[:3])}")
+        
+        # If no specific changes detected, analyze line differences
+        if not summary_parts:
+            old_lines = len([line for line in old_content.split('\n') if line.strip()])
+            new_lines = len([line for line in new_content.split('\n') if line.strip()])
+            
+            if new_lines > old_lines:
+                summary_parts.append(f"Added {new_lines - old_lines} lines of code")
+            elif old_lines > new_lines:
+                summary_parts.append(f"Removed {old_lines - new_lines} lines of code")
+            else:
+                summary_parts.append("Code modifications detected")
         
         return '. '.join(summary_parts)
 
@@ -250,6 +317,18 @@ Keep it under 100 words and focus on functional impact.
         """Find files impacted by the changes through dependency analysis"""
         
         print(f"[DEBUG] Finding impacted files for {len(changes)} changes")
+        
+        # Extract actual file paths from diff changes
+        actual_changed_files = []
+        for change in changes:
+            if change.diff:
+                # Extract file paths from diff
+                file_changes = GitDiffExtractor.extract_file_changes(change.diff)
+                actual_changed_files.extend(file_changes.keys())
+            else:
+                actual_changed_files.append(change.file_path)
+        
+        print(f"[DEBUG] Actual changed files: {actual_changed_files}")
         
         impacted_files = []
         
