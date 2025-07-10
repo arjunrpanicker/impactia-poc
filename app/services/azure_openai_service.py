@@ -20,9 +20,9 @@ class AzureOpenAIService:
         self.deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
         self.embeddings_deployment = os.getenv("AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT_NAME")
 
-    async def get_embeddings(self, text: str) -> List[float]:
+    def get_embeddings(self, text: str) -> List[float]:
         """Get embeddings for text using Azure OpenAI"""
-        response = await self.client.embeddings.create(
+        response = self.client.embeddings.create(
             model=self.embeddings_deployment,
             input=text
         )

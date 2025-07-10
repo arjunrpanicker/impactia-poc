@@ -311,7 +311,7 @@ class EnhancedRAGService:
                 if len(content) > 24000:  # Rough estimate: 1 token ≈ 4 characters
                     content = content[:24000] + "\n... (content truncated due to length)"
                 
-                file_embedding = await self.openai_service.get_embeddings(content)
+                file_embedding = self.openai_service.get_embeddings(content)
             except Exception as e:
                 print(f"Error generating embedding for {relative_path}: {str(e)}")
                 return 0, 0
@@ -636,7 +636,7 @@ class EnhancedRAGService:
                 continue
                 
             # Generate embedding for the change
-            embedding = await self.openai_service.get_embeddings(change.content)
+            embedding = self.openai_service.get_embeddings(change.content)
             
             # Search for similar files
             similar_results = await self._search_similar_enhanced(
