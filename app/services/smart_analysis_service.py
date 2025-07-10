@@ -444,6 +444,7 @@ class SmartAnalysisService:
                     ))
             
             # Create function changes from regex analysis as baseline
+            regex_changes = []
             if not regex_changes:  # Only process functions if we haven't already added content changes
                 all_function_names = set(old_functions.keys()) | set(new_functions.keys())
                 

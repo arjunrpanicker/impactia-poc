@@ -11,6 +11,7 @@ from .services.azure_openai_service import AzureOpenAIService
 from .services.ado_service import AzureDevOpsService
 from .services.performance_analyzer import PerformanceAnalyzer
 from .services.smart_analysis_service import SmartAnalysisService, AnalysisMethod
+from .services.impact_analysis_service import ImpactAnalysisService
 from .models.analysis import ChangeAnalysisRequest, ChangeAnalysisResponse, ChangeAnalysisRequestForm, CodeChange, ChangeAnalysisResponseWithCode
 from .models.enhanced_analysis import AnalysisRequest, EnhancedAnalysisResponse, AnalysisConfiguration
 from .utils.diff_utils import is_diff_format, extract_file_content_from_diff, GitDiffExtractor
@@ -39,6 +40,7 @@ rag_service = enhanced_rag_service  # Backward compatibility
 openai_service = AzureOpenAIService()
 performance_analyzer = PerformanceAnalyzer()
 smart_analysis_service = SmartAnalysisService()
+impact_analysis_service = ImpactAnalysisService()
 
 # Conditionally initialize ADO service
 ENABLE_ADO_INTEGRATION = os.getenv("ENABLE_ADO_INTEGRATION", "false").lower() == "true"
@@ -319,7 +321,106 @@ async def analyze_changes_smart(
         print(f"[DEBUG] Error in smart analysis: {str(e)}")
         import traceback
         traceback.print_exc()
+@app.post("/analyze/comprehensive")
+async def analyze_comprehensive_impact(
+    files: List[UploadFile] = File(...),
+    update_ado: bool = Form(default=False),
+    ado_item_id: str = Form(default=None)
+):
+    """
+    Comprehensive impact analysis focused on test case generation
+    """
+    try:
+        print(f"[DEBUG] Comprehensive analysis started with {len(files)} files")
+        
+        # Validate ADO integration request
+        if update_ado and not ENABLE_ADO_INTEGRATION:
+            raise HTTPException(
+                status_code=400,
+                detail="Azure DevOps integration is disabled. Set ENABLE_ADO_INTEGRATION=true to enable it."
+            )
+
+        # Process uploaded files into CodeChange objects
+        changes = []
+        for file in files:
+            print(f"[DEBUG] Processing file: {file.filename}")
+            content = await file.read()
+            
+            try:
+                text_content = content.decode('utf-8')
+            except UnicodeDecodeError:
+                print(f"[DEBUG] Failed to decode {file.filename} as UTF-8")
+                continue
+            
+            print(f"[DEBUG] File content length: {len(text_content)}")
+            
+            # Create CodeChange object
+            if is_diff_format(text_content):
+                print(f"[DEBUG] File {file.filename} is in diff format")
+                changes.append(CodeChange(
+                    file_path=file.filename,
+                    content=None,
+                    diff=text_content,
+                    change_type="modified"
+                ))
+            else:
+                print(f"[DEBUG] File {file.filename} is regular content")
+                changes.append(CodeChange(
+                    file_path=file.filename,
+                    content=text_content,
+                    change_type="added"
+                ))
+
+        if not changes:
+            raise HTTPException(status_code=400, detail="No valid changes found in uploaded files")
+
+        print(f"[DEBUG] Created {len(changes)} CodeChange objects")
+        
+        # Perform comprehensive impact analysis
+        impact_analysis = await impact_analysis_service.analyze_comprehensive_impact(changes)
+        
+        # Convert to response format
+        response = {
+            "summary": impact_analysis.summary,
+            "impact_areas": [
+                {
+                    "category": area.category.value,
+                    "description": area.description,
+                    "affected_functionality": area.affected_functionality,
+                    "test_scenarios": area.test_scenarios,
+                    "risk_level": area.risk_level,
+                    "user_impact": area.user_impact
+                }
+                for area in impact_analysis.impact_areas
+            ],
+            "overall_risk": impact_analysis.overall_risk,
+            "testing_priority": impact_analysis.testing_priority,
+            "recommended_test_types": impact_analysis.recommended_test_types,
+            "potential_side_effects": impact_analysis.potential_side_effects,
+            "rollback_considerations": impact_analysis.rollback_considerations,
+            "test_case_generation_guide": {
+                "priority_areas": [area.category.value for area in impact_analysis.impact_areas if area.risk_level in ["high", "critical"]],
+                "key_test_scenarios": [scenario for area in impact_analysis.impact_areas for scenario in area.test_scenarios],
+                "risk_mitigation_tests": impact_analysis.potential_side_effects
+            },
+            "analysis_metadata": {
+                "total_files_analyzed": len(changes),
+                "analysis_method": "comprehensive_impact",
+                "focus": "test_case_generation"
+            }
+        }
+        
+        print(f"[DEBUG] Comprehensive analysis completed")
+        print(f"[DEBUG] Found {len(impact_analysis.impact_areas)} impact areas")
+        print(f"[DEBUG] Overall risk: {impact_analysis.overall_risk}")
+        
+        return response
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+    except Exception as e:
+        print(f"[DEBUG] Error in comprehensive analysis: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Comprehensive analysis failed: {str(e)}")
 
 @app.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
 async def analyze_changes_enhanced(
